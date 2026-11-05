@@ -72,6 +72,24 @@ Every section folds with its header.
 
 ![The pane in VS Code](../docs/vscode.png)
 
+### Timeline
+What happened, prompt by prompt, at the bottom of the pane:
+
+```
+09:41  look at the parser            1m 30s · 2 calls
+14:02  now fix it                                live
+›  Read 3 files: a.ts, c.ts +1
+✎  Edited a.ts
+◆  Check the tests  · Explore
+›  Read parser.test.ts  · Explore
+$  Ran npm test
+✓  Step done: Fix the parser
+```
+
+- **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
+- **The latest prompt:** event by event. Events in a row of one kind become one line, so five reads are `Read 5 files`, not five lines.
+- **Marks:** ✎ edit, $ command, ⌕ search, › read, ◍ web, ⇄ connector, ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked. A subagent's events carry its type.
+
 ### Sessions
 `/sessions` opens a second pane with your recent sessions, grouped by the folder each one ran in, this folder first. Each row has the session's title, or its first prompt, and how long ago it ran. The chat you are in is marked.
 
@@ -98,7 +116,7 @@ Run `/reload-plugins`, or start a new session. The pane opens by itself the firs
 
 Claude Code keeps a copy of each installed mod and checks the version in `plugin.json` to decide whether there is a new one. See the [CHANGELOG](./CHANGELOG.md) for what changed in each version.
 
-**Automatic (recommended):** run `/plugin`, open the **Marketplaces** tab, select `julio-mods` and turn on auto-update. It is off by default for marketplaces outside Anthropic. Claude Code then fetches new versions when it starts.
+**Automatic (recommended):** run `/plugin`, open the **Marketplaces** tab, select `julio-mods` and choose **Enable auto-update**. It is off by default for marketplaces that are not Anthropic's official ones. Once it is on, Claude Code checks for new versions in the background after the first message of a session, within about ten minutes, and the new version loads in your next session or after `/reload-plugins`.
 
 **By hand,** from a shell:
 
@@ -107,7 +125,7 @@ claude plugin marketplace update julio-mods
 claude plugin update whatishappening@julio-mods
 ```
 
-Then restart Claude Code, or run `/reload-plugins`.
+The new version loads in your next session, or after `/reload-plugins` in a running one.
 
 ## The plan tool
 

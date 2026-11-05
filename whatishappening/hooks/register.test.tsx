@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { modelName, serverLabel, sessionGroups, tokenTotals, USAGE_SED } from './register'
+import { groupStory, modelName, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -77,6 +77,7 @@ function world(on: On, w: World = {}) {
   on('agent.list', async () => ({ value: [] }) as never)
   on('agent.spawn', async () => ({ model: 'opus', agentId: 'ag1' }) as never)
   on('turn.complete', async () => ({ text: '' }) as never)
+  on('turn.start', async ($, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
   on('prompt.submit', async ($, e) => e as never)
   // The engine's own band, which ours must keep below it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
@@ -127,6 +128,16 @@ test('sessions are grouped by folder, the most recent folder first, titled or na
   expect(sessionGroups('garbage\n\n'), 'a line that is no session is skipped').toEqual([])
 })
 
+test('timeline events: a run of one kind is one line, an error or a block says so', () => {
+  const ev = (kind: string, text: string, who?: string) => ({ at: 1, kind, text, ...(who ? { who } : {}) }) as never
+  const groups = groupStory([ev('read', 'a.ts'), ev('read', 'b.ts'), ev('read', 'c.ts'), ev('read', 'd.ts', 'Explore'), ev('edit', 'a.ts'), ev('step', 'Ship it')])
+  expect(groups.map(g => storyLine(g))).toEqual(['Read 3 files: a.ts, b.ts +1', 'Read d.ts', 'Edited a.ts', 'Step done: Ship it'])
+  expect(groups[1]!.who, "an agent's reads stay apart from the main chat's").toBe('Explore')
+  expect(storyOf('Bash', { command: 'npm test' }, { isError: true, result: '' }), 'a failed call').toEqual({ kind: 'error', text: 'Bash npm test' })
+  expect(storyOf('Edit', { file_path: '/x/a.ts' }, { deny: 'no' }), 'a blocked call').toEqual({ kind: 'deny', text: 'Edit a.ts' })
+  expect(storyOf('TodoWrite', {}, { result: '' }), 'told as steps instead').toBeNull()
+})
+
 test('server names read as words, a random id as a short tag', () => {
   expect(serverLabel('plugin_engineering_slack'), 'plugin prefix dropped').toBe('Slack')
   expect(serverLabel('claude_ai_Claude_Docs'), 'claude.ai prefix dropped').toBe('Claude Docs')
@@ -154,7 +165,7 @@ for (const surface of SURFACES) {
     for (const t of [/GitLab/, /Slack/, /^2 calls$/, /^1 call$/, /app\.ts/, /CLAUDE\.md/, /release-notes/, /house-style/, /^at start$/]) {
       expect(await ui.find({ text: t }), `${t} shows`).toBeDefined()
     }
-    expect(await ui.find({ text: /scratch\.txt/ }), 'temp files are not context').toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^scratch\.txt$/ }), 'temp files are not context (the timeline still tells the read)').toBeUndefined()
     expect(await ui.find({ text: /SKILL\.md/ }), 'a SKILL.md is a skill, not a file').toBeUndefined()
   })
 
@@ -187,15 +198,15 @@ for (const surface of SURFACES) {
     await clock.settle()
 
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ text: /search issues/ }), 'closed at first').toBeUndefined()
+    expect(await ui.find({ text: /^\s+search issues/ }), 'closed at first').toBeUndefined()
     await ui.press({ key: 'c:GitLab' })
-    expect(await ui.find({ text: /search issues/ }), 'the call shows').toBeDefined()
+    expect(await ui.find({ text: /^\s+search issues/ }), 'the call shows').toBeDefined()
     expect(await ui.find({ text: /login bug/ }), 'with its query').toBeDefined()
     await ui.press({ key: 'c:Slack' })
-    expect(await ui.find({ text: /search issues/ }), 'one list open at a time').toBeUndefined()
-    expect(await ui.find({ text: /send message/ }), 'Slack open').toBeDefined()
+    expect(await ui.find({ text: /^\s+search issues/ }), 'one list open at a time').toBeUndefined()
+    expect(await ui.find({ text: /^\s+send message/ }), 'Slack open').toBeDefined()
     await ui.press({ key: 'c:Slack' })
-    expect(await ui.find({ text: /send message/ }), 'second press closes it').toBeUndefined()
+    expect(await ui.find({ text: /^\s+send message/ }), 'second press closes it').toBeUndefined()
   })
 
   if (surface === 'terminal')
@@ -207,10 +218,10 @@ for (const surface of SURFACES) {
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     await ui.press({ key: 'sec-files' })
-    expect(await ui.find({ text: /app\.ts/ }), 'folded').toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^app\.ts$/ }), 'folded').toBeUndefined()
     expect(await ui.find({ text: /release-notes|house-style/ }), 'other sections stay open').toBeDefined()
     await ui.press({ key: 'sec-files' })
-    expect(await ui.find({ text: /app\.ts/ }), 'open again').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^app\.ts$/ }), 'open again').toBeDefined()
   })
 
   test(`a TodoWrite list draws its marks, and no plan shows one dim line (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -235,7 +246,8 @@ for (const surface of SURFACES) {
     ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ type: 'Text', text: /^1\/3 · 33%$/ }), 'count').toBeDefined()
     expect(await ui.find({ text: /^Building the parser$/ }), 'the step in progress is the headline').toBeDefined()
-    for (const m of [/^✓$/, /^●$/, /^○$/]) expect((await ui.findAll({ type: 'Text', text: m })).length, `${m} once`).toBe(1)
+    for (const m of [/^●$/, /^○$/]) expect((await ui.findAll({ type: 'Text', text: m })).length, `${m} once`).toBe(1)
+    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'the done step, in the To-do and as a timeline event').toBe(2)
     expect((await ui.find({ type: 'Text', text: /^Sketch the schema$/ }))?.props.strikethrough, 'done is struck through').toBe(true)
     expect((await ui.findAll({ type: 'Text', text: /^Building the parser$/ })).some(t => t.props.bold), 'the running step, in its -ing form').toBe(true)
   })
@@ -476,6 +488,36 @@ for (const surface of SURFACES) {
     await ui.press({ key: `sess:${SID(2)}` })
     expect(await ui.find({ text: new RegExp(`cd /home/dev/other && claude --resume ${SID(2)}`) }), "another folder's: the command to run").toBeDefined()
     expect(filled, 'nothing typed for it').toHaveLength(1)
+  })
+
+  test(`the timeline tells the latest prompt event by event and earlier ones in one line (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const clock = world(on)
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    const call = $.tool.call as unknown as Call
+    const start = $.turn.start as unknown as (input: Record<string, unknown>) => Promise<unknown>
+    const end = () => $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as never)
+    await start({ text: 'look at the parser', turnId: 't1' })
+    await call({ tool: 'Read', tool_use_id: 'a1', file_path: '/home/dev/project/a.ts' })
+    await call({ tool: 'Read', tool_use_id: 'a2', file_path: '/home/dev/project/b.ts' })
+    await clock.advance(90_000)
+    await end()
+    await start({ text: 'now fix it', turnId: 't2' })
+    await call({ tool: 'Read', tool_use_id: 'b1', file_path: '/home/dev/project/a.ts' })
+    await call({ tool: 'Read', tool_use_id: 'b2', file_path: '/home/dev/project/c.ts' })
+    await call({ tool: 'Read', tool_use_id: 'b3', file_path: '/home/dev/project/d.ts' })
+    await call({ tool: 'Edit', tool_use_id: 'b4', file_path: '/home/dev/project/a.ts' })
+    await $.agent.spawn({ prompt: 'p', description: 'Check the tests', subagentType: 'Explore' } as never)
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
+    expect(await ui.find({ type: 'Text', text: /^Timeline$/ }), 'the section').toBeDefined()
+    expect(await ui.find({ text: /\d\d:\d\d  look at the parser$/ }), 'the earlier prompt, with its time').toBeDefined()
+    expect(await ui.find({ text: /^1m 30s · 2 calls$/ }), 'in one line: how long, how many calls').toBeDefined()
+    expect(await ui.find({ text: /^now fix it$/ }), 'the latest prompt').toBeDefined()
+    expect(await ui.find({ text: /^live$/ }), 'still running').toBeDefined()
+    expect(await ui.find({ text: /^Read 3 files: a\.ts, c\.ts \+1$/ }), 'three reads, one line').toBeDefined()
+    expect(await ui.find({ text: /^Edited a\.ts$/ }), 'the edit').toBeDefined()
+    expect(await ui.find({ text: /^Check the tests$/ }), 'the agent it started').toBeDefined()
   })
 
   test(`a finished plan stays at 100% for 20 s, then leaves the band (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

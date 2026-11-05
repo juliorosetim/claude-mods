@@ -97,6 +97,29 @@ export type UsageView = {
   at: number
 }
 
+/** One thing that happened, for the timeline. */
+export type StoryEvent = {
+  /** Epoch milliseconds. */
+  at: number
+  kind: 'read' | 'edit' | 'run' | 'search' | 'web' | 'connector' | 'agent' | 'agent-done' | 'step' | 'error' | 'deny' | 'other'
+  /** What it was about, short: a file name, a command, a step. */
+  text: string
+  /** The agent type, for an event of a subagent's. */
+  who?: string
+}
+
+/** One prompt of the main chat and what happened while Claude answered it. */
+export type StoryTurn = {
+  id: string
+  /** The prompt's start, short; '' for the entry opened after a reload. */
+  prompt: string
+  startedAt: number
+  /** When the answer ended; absent while it runs. */
+  endedAt?: number
+  /** Oldest first; capped. */
+  events: StoryEvent[]
+}
+
 /** One earlier Claude Code session. */
 export type SessionRow = {
   id: string
@@ -124,6 +147,8 @@ declare module 'claude-code' {
       open: string
       /** Sections the person closed. */
       folded: string[]
+      /** The timeline: the latest prompts and what happened during each. */
+      story: StoryTurn[]
       /** The recent sessions the Sessions pane lists. */
       sessions: SessionList
       /** The session from another folder whose resume command is shown; '' for none. */

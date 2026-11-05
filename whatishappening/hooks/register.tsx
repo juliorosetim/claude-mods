@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { AgentRow, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, Tally, UsageView, Used } from '../types'
+import type { AgentRow, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, StoryEvent, StoryTurn, Tally, UsageView, Used } from '../types'
 
 const PLUGIN = 'whatishappening'
 const PANE = 'whatishappening'
 const TITLE = 'What is happening'
-const SECTIONS = ['usage', 'todo', 'files', 'connectors', 'agents', 'skills'] as const
+const SECTIONS = ['usage', 'todo', 'files', 'connectors', 'agents', 'skills', 'timeline'] as const
 type Kind = 'connectors' | 'files' | 'skills'
 
 const ACCENT = '#d97757'
@@ -26,7 +26,7 @@ const TRAIL = 6
 // Call times kept per agent, for its activity lane.
 const BEATS = 120
 // Each section's own color, a theme key, so light, dark and colorblind themes all read.
-const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning' } as const
+const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning', timeline: 'ide' } as const
 // Narrowest agent card that still reads; below it the cards stack.
 const MIN_CARD = 26
 // The bars of an activity lane, from a quiet moment to the busiest.
@@ -91,6 +91,10 @@ const sessionsAtom = atom({ plugin: 'whatishappening', key: 'sessions' } as cons
 // The session whose resume command is shown (one from another folder); '' for none.
 const shownAtom = atom({ plugin: 'whatishappening', key: 'shown' } as const, '')
 const SESSIONS_PANE = 'whatishappening-sessions'
+// The timeline: one entry per prompt, each with what happened during it.
+const storyAtom = atom({ plugin: 'whatishappening', key: 'story' } as const, [] as StoryTurn[])
+const STORY_TURNS = 12
+const STORY_EVENTS = 80
 const MAX_SESSIONS = 60
 const PER_FOLDER = 8
 
@@ -369,11 +373,14 @@ async function watchPlan($: EngineInterface, call: Record<string, unknown> & { t
   if (!PLAN_TOOLS.has(call.tool) || call.agentId) return false
   const now = await $.clock.now()
   let changed = false
+  let finished: string[] = []
   await update($, planAtom, cur => {
     const next = planAfter(cur, call.tool, call, result, Math.max(now, cur.updatedAt + 1))
     changed = next !== null
+    finished = next ? stepsFinished(cur, next) : []
     return next ?? cur
   })
+  for (const step of finished) await tell($, { at: now, kind: 'step', text: step })
   return changed
 }
 
@@ -618,6 +625,94 @@ const USAGE_TRACK = '#b79be0'
 /** A meter's fill by how full it is: the purple, then warning from 70%, critical from 90%. */
 const severity = (pct: number) => (pct >= 90 ? CRITICAL : pct >= 70 ? WARNING : USAGE_FILL)
 
+// ---------- the timeline ----------
+
+const READS = new Set(['Read', 'NotebookRead'])
+const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const SEARCHES = new Set(['Grep', 'Glob'])
+const WEB = new Set(['WebFetch', 'WebSearch'])
+// Calls the timeline tells another way (a spawn, a plan step) or not at all.
+const UNTOLD = new Set([...PLAN_TOOLS, 'Agent', 'Task', 'SubagentHandback', 'ToolSearch'])
+
+/** One call as a timeline event, or null for a call told another way. */
+export function storyOf(tool: string, input: Record<string, unknown>, ran: unknown): Omit<StoryEvent, 'at' | 'who'> | null {
+  if (UNTOLD.has(tool)) return null
+  const r = ran as { deny?: unknown; isError?: unknown }
+  const path = fileName(text(input.file_path) || text(input.notebook_path))
+  const told: Omit<StoryEvent, 'at' | 'who'> = READS.has(tool)
+    ? { kind: 'read', text: path }
+    : EDITS.has(tool)
+      ? { kind: 'edit', text: path }
+      : tool === 'Bash'
+        ? { kind: 'run', text: short(homeless(text(input.command)), 60) }
+        : SEARCHES.has(tool)
+          ? { kind: 'search', text: short(text(input.pattern), 40) }
+          : WEB.has(tool)
+            ? { kind: 'web', text: short(text(input.url) || text(input.query), 50) }
+            : tool.startsWith('mcp__')
+              ? { kind: 'connector', text: actionOf(tool, input) }
+              : { kind: 'other', text: actionOf(tool, input) }
+  if (r?.deny !== undefined) return { kind: 'deny', text: `${tool} ${told.text}`.trim() }
+  if (r?.isError === true) return { kind: 'error', text: `${tool} ${told.text}`.trim() }
+  return told
+}
+
+/** The steps a plan update marked completed. */
+function stepsFinished(before: Plan, after: Plan): string[] {
+  const was = new Set(before.steps.filter(st => st.status === 'completed').map(st => st.text))
+  return after.steps.filter(st => st.status === 'completed' && !was.has(st.text)).map(st => st.text)
+}
+
+/** Adds an event to the latest entry, opening one when the timeline has none yet (a reload mid-turn). */
+async function tell($: EngineInterface, ev: StoryEvent) {
+  await update($, storyAtom, turns => {
+    const last = turns[turns.length - 1] ?? { id: 'before', prompt: '', startedAt: ev.at, events: [] }
+    const rest = turns.length ? turns.slice(0, -1) : []
+    return [...rest, { ...last, events: [...last.events, ev].slice(-STORY_EVENTS) }]
+  })
+}
+
+// Kinds whose runs of events read as one line: five reads in a row are "Read 5 files".
+const GROUPED = new Set<StoryEvent['kind']>(['read', 'edit', 'search', 'run', 'web'])
+
+/** Events in a row of one kind, by the same agent, joined into one line each. */
+export function groupStory(events: StoryEvent[]): { kind: StoryEvent['kind']; at: number; who?: string; items: string[] }[] {
+  const out: { kind: StoryEvent['kind']; at: number; who?: string; items: string[] }[] = []
+  for (const ev of events) {
+    const last = out[out.length - 1]
+    if (last && GROUPED.has(ev.kind) && last.kind === ev.kind && last.who === ev.who) last.items.push(ev.text)
+    else out.push({ kind: ev.kind, at: ev.at, ...(ev.who ? { who: ev.who } : {}), items: [ev.text] })
+  }
+  return out
+}
+
+/** A grouped line in words: "Read 3 files: a.ts, b.ts +1". */
+export function storyLine(g: { kind: StoryEvent['kind']; items: string[] }): string {
+  const n = g.items.length
+  const unique = [...new Set(g.items.filter(Boolean))]
+  const list = unique.length > 2 ? `${unique.slice(0, 2).join(', ')} +${unique.length - 2}` : unique.join(', ')
+  switch (g.kind) {
+    case 'read':
+      return n > 1 ? `Read ${n} files: ${list}` : `Read ${list}`
+    case 'edit':
+      return n > 1 ? `Edited ${n} files: ${list}` : `Edited ${list}`
+    case 'search':
+      return n > 1 ? `Searched ${n} times: ${list}` : `Searched ${list}`
+    case 'run':
+      return n > 1 ? `Ran ${n} commands, last: ${g.items[n - 1]}` : `Ran ${list}`
+    case 'web':
+      return n > 1 ? `Looked up ${n} pages: ${list}` : `Looked up ${list}`
+    case 'step':
+      return `Step done: ${list}`
+    case 'error':
+      return `Failed: ${list}`
+    case 'deny':
+      return `Blocked: ${list}`
+    default:
+      return list
+  }
+}
+
 // ---------- other sessions ----------
 
 // One line per session file, newest first: modified time, path, its first cwd, its latest title and its first prompt.
@@ -784,14 +879,30 @@ export const register: Register = on => {
     }
     const now = await $.clock.now()
     let saved: Plan | null = null
-    await update($, planAtom, cur => (saved = planAfter(cur, OWN_PLAN_TOOL, call, undefined, Math.max(now, cur.updatedAt + 1))) ?? cur)
+    let finished: string[] = []
+    await update($, planAtom, cur => {
+      saved = planAfter(cur, OWN_PLAN_TOOL, call, undefined, Math.max(now, cur.updatedAt + 1))
+      finished = saved ? stepsFinished(cur, saved) : []
+      return saved ?? cur
+    })
     const plan = saved as Plan | null
     if (!plan || !plan.steps.length) return { result: 'Nothing saved: each step needs a text and a status.' } as never
+    for (const step of finished) await tell($, { at: now, kind: 'step', text: step })
     notePlanned()
     openOnce($)
     const done = plan.steps.filter(st => st.status === 'completed').length
     return { result: `To-do list updated: ${done}/${plan.steps.length} completed.` } as never
   }).catch(() => ({ result: 'The to-do list could not be saved this time. Go on with your work.' }) as never)
+
+  // A prompt of the main chat opens a new entry in the timeline.
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) {
+      const at = await $.clock.now()
+      const prompt = short(e.text, 80)
+      await update($, storyAtom, turns => [...turns, { id: e.turnId, prompt, startedAt: at, events: [] }].slice(-STORY_TURNS))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // A new prompt is a new task: the reminders count from zero.
   on('prompt.submit', async ($, e, next) => {
@@ -821,6 +932,7 @@ export const register: Register = on => {
     if (!ran.agentId) return ran
     try {
       await upsertAgent($, ran.agentId, () => ({ type: e.subagentType, description: e.description, status: 'running', model: ran.model }))
+      await tell($, { at: await $.clock.now(), kind: 'agent', text: e.description || 'started', who: e.subagentType })
       openOnce($)
     } catch (err) {
       await logError($, 'agent.spawn', err)
@@ -833,6 +945,8 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!e.agentId) {
       void refreshUsage($, true)
+      const now = await $.clock.now()
+      await update($, storyAtom, turns => (turns.length ? [...turns.slice(0, -1), { ...turns[turns.length - 1]!, endedAt: now }] : turns))
       return ran
     }
     if (!(await read($, agentsAtom)).some(r => r.id === e.agentId)) return ran
@@ -845,6 +959,9 @@ export const register: Register = on => {
       tokens: (old.tokens ?? 0) + spent,
       ...(u?.model ? { model: u.model } : {}),
     }))
+    const row = (await read($, agentsAtom)).find(r => r.id === e.agentId)
+    const took = row?.startedAt ? ` in ${runText(now - row.startedAt)}` : ''
+    await tell($, { at: now, kind: e.isAborted ? 'error' : 'agent-done', text: `${e.isAborted ? 'stopped' : 'finished'}${took}`, who: row?.type })
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -871,6 +988,11 @@ export const register: Register = on => {
     try {
       if ((ran as { deny?: unknown }).deny !== undefined) return ran
       await note($, call.tool_use_id, usesOf(call.tool, call))
+      const told = storyOf(call.tool, call, ran)
+      if (told) {
+        const who = call.agentId ? (await read($, agentsAtom)).find(r => r.id === call.agentId)?.type : undefined
+        await tell($, { at: await $.clock.now(), ...told, ...(who ? { who } : {}) })
+      }
       if (await watchPlan($, call, (ran as { result?: unknown }).result)) openOnce($)
       if (call.agentId) {
         // Its own TodoWrite or Task list goes on its card (the plan tool answers for itself above).
@@ -1412,6 +1534,86 @@ export const register: Register = on => {
         )
       : nothing
 
+    // ---------- Timeline: earlier prompts as one line each, the latest one told event by event ----------
+    const story = await read($, storyAtom)
+    const MARKS: Record<StoryEvent['kind'], [string, string]> = {
+      read: ['›', 'subtle'],
+      edit: ['✎', 'warning'],
+      run: ['$', 'suggestion'],
+      search: ['⌕', 'subtle'],
+      web: ['◍', 'suggestion'],
+      connector: ['⇄', 'success'],
+      agent: ['◆', 'permission'],
+      'agent-done': ['◇', 'permission'],
+      step: ['✓', 'success'],
+      error: ['✗', 'error'],
+      deny: ['⊘', 'error'],
+      other: ['•', 'subtle'],
+    }
+    const latest = story[story.length - 1]
+    const earlier = story.slice(0, -1).slice(-4)
+    const recap = (tu: StoryTurn) => {
+      const calls = tu.events.filter(ev => !['step', 'agent', 'agent-done'].includes(ev.kind)).length
+      const edits = tu.events.filter(ev => ev.kind === 'edit').length
+      const errors = tu.events.filter(ev => ev.kind === 'error' || ev.kind === 'deny').length
+      return [tu.endedAt ? runText(tu.endedAt - tu.startedAt) : '', plural(calls, 'call'), edits ? plural(edits, 'edit') : '', errors ? plural(errors, 'error') : '']
+        .filter(Boolean)
+        .join(' · ')
+    }
+    const groups = latest ? groupStory(latest.events).slice(-12) : []
+    const timelineBody = [
+      ...earlier.map(tu =>
+        line(
+          `tu:${tu.id}`,
+          <Text wrap="truncate-end" color="subtle">
+            <Text tabular>{`${hhmm(tu.startedAt)}  `}</Text>
+            {tu.prompt || 'before the reload'}
+          </Text>,
+          <Text size="caption" color="subtle" tabular>
+            {recap(tu)}
+          </Text>,
+        ),
+      ),
+      latest ? (
+        <Box key="latest" flexDirection="column" width={inner} marginTop={earlier.length ? 1 : 0}>
+          {line(
+            'latest-head',
+            <Text wrap="truncate-end">
+              <Text color="ide" tabular>{`${hhmm(latest.startedAt)}  `}</Text>
+              <Text weight="semibold">{latest.prompt || 'Before the reload'}</Text>
+            </Text>,
+            latest.endedAt ? (
+              <Text size="caption" color="subtle" tabular>
+                {recap(latest)}
+              </Text>
+            ) : (
+              <Text size="caption" color="claude">
+                live
+              </Text>
+            ),
+          )}
+          {groups.length
+            ? groups.map((g, i) => {
+                const [glyph, tint] = MARKS[g.kind]
+                return (
+                  <Box key={`ev${i}`} flexDirection="row" width={inner} height={H1}>
+                    <Box width={2} flexShrink={0}>
+                      <Text color={tint}>{glyph}</Text>
+                    </Box>
+                    <Box width={inner - 2} flexShrink={0} height={H1} overflow="hidden">
+                      <Text size="caption" wrap="truncate-end" color={g.kind === 'error' || g.kind === 'deny' ? 'error' : undefined}>
+                        {storyLine(g)}
+                        {g.who ? <Text color="subtle">{`  · ${g.who}`}</Text> : null}
+                      </Text>
+                    </Box>
+                  </Box>
+                )
+              })
+            : [note('quiet', latest.endedAt ? 'An answer with no tool calls.' : 'Thinking…')]}
+        </Box>
+      ) : null,
+    ]
+
     // The line on top: what the chat is doing right now, in one glance.
     const running = agents.filter(a => a.status === 'running').length
     const current = plan.steps.find(st => st.status === 'in_progress')
@@ -1478,6 +1680,7 @@ export const register: Register = on => {
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', `${live} running · ${agents.length - live} done`, agentBody, live > 0) : null}
         {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
+        {story.length ? block('timeline', 'Timeline', latest && !latest.endedAt ? 'live' : plural(story.length, 'prompt'), timelineBody, Boolean(latest && !latest.endedAt)) : null}
       </Box>
     )
   })

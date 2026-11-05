@@ -4,6 +4,12 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-05
+
+- **Timeline section:** what happened, prompt by prompt. The latest prompt is told event by event, and the earlier ones in one line each (`1m 30s · 12 calls · 2 edits · 1 error`).
+- Events in a row of one kind read as one line: `Read 3 files: a.ts, c.ts +1`, `Ran 4 commands, last: npm test`.
+- Each event has a mark of its own (✎ edit, $ command, ⌕ search, ⇄ connector, ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked), and a subagent's events carry its type.
+
 ## 0.3.0 - 2026-11-05
 
 - **`/sessions`** opens a Sessions pane: your recent Claude Code sessions grouped by the folder each ran in, this folder first, each with its title (or its first prompt) and how long ago it ran.
