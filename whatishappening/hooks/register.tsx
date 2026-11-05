@@ -23,6 +23,14 @@ const MAX_CALLS = 30
 const MAX_AGENTS = 30
 // Steps kept per agent for its card, the last one the step it is on.
 const TRAIL = 6
+// Call times kept per agent, for its activity lane.
+const BEATS = 120
+// Each section's own color, a theme key, so light, dark and colorblind themes all read.
+const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning' } as const
+// Narrowest agent card that still reads; below it the cards stack.
+const MIN_CARD = 26
+// The bars of an activity lane, from a quiet moment to the busiest.
+const LEVELS = '▁▂▃▄▅▆▇█'
 // $.session.messages() returns at most this many entries: a history that long may be cut.
 const MESSAGES_CAP = 4096
 const LIVE = new Set(['pending', 'running', 'waiting', 'idle'])
@@ -232,6 +240,7 @@ function usesOf(tool: string, input: Record<string, unknown>): Hit[] {
 /** "Read auth.ts", "Gitlab: search issues login": what one call of an agent is doing. */
 function actionOf(tool: string, input: Record<string, unknown>): string {
   if (PLAN_TOOLS.has(tool)) return 'Update its to-do list'
+  if (tool === 'SubagentHandback') return 'Hand back its report'
   const name = tool.startsWith('mcp__') ? `${serverLabel(tool.split('__')[1] ?? '')}: ${toolWords(tool)}` : tool
   const arg = tool === 'Bash' ? short(homeless(text(input.command)), 50) : argOf(input)
   return arg ? `${name} ${arg}` : name
@@ -431,11 +440,24 @@ async function refreshUsage($: EngineInterface, withTokens: boolean) {
       if (await $.fs.exists(path)) tokens = await totalsOf($, path)
     }
     const at = await $.clock.now()
+    let fiveHour = limitOf(u.rateLimits, 'five_hour')
+    let sevenDay = limitOf(u.rateLimits, 'seven_day')
+    if (fiveHour || sevenDay) {
+      // Kept across sessions, so a new session shows the limits before its first reply.
+      await $.store.set('limits', { fiveHour, sevenDay, at }).catch(() => undefined)
+    } else {
+      // No reading yet in this session: the latest one any session saw, marked with when it was taken.
+      const cur = await read($, usageAtom)
+      const kept = (await $.store.get('limits').catch(() => undefined)) as { fiveHour: LimitRow | null; sevenDay: LimitRow | null; at: number } | undefined
+      const stale = (l: LimitRow | null | undefined) => (l ? { ...l, asOf: kept?.at ?? 0 } : null)
+      fiveHour = cur.fiveHour ?? stale(kept?.fiveHour)
+      sevenDay = cur.sevenDay ?? stale(kept?.sevenDay)
+    }
     await update($, usageAtom, cur => ({
       ...cur,
       ...tokens,
-      fiveHour: limitOf(u.rateLimits, 'five_hour'),
-      sevenDay: limitOf(u.rateLimits, 'seven_day'),
+      fiveHour,
+      sevenDay,
       contextTokens: u.context.tokens ?? cur.contextTokens,
       contextWindow: u.context.window,
       at,
@@ -571,19 +593,23 @@ async function recount($: EngineInterface) {
 
 /** A rounded bar as a picture: `part` filled in `color`, the track a light step of the same color. `boxH` is the
  * picture's height, the 8 px bar in its middle (a band row is 18 px: a shorter picture sat at the top of the row). */
-function barSvg(part: number, color: string, w: number, boxH: number): string {
+function barSvg(part: number, color: string, w: number, boxH: number, track = color): string {
   const fill = Math.round(Math.min(1, Math.max(0, part)) * w)
   const y = (boxH - 8) / 2
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${boxH}" width="${w}" height="${boxH}">` +
-    `<rect y="${y}" width="${w}" height="8" rx="4" fill="${color}" fill-opacity="0.2"/>` +
+    `<rect y="${y}" width="${w}" height="8" rx="4" fill="${track}" fill-opacity="${track === color ? 0.2 : 0.35}"/>` +
     (fill ? `<rect y="${y}" width="${Math.max(8, fill)}" height="8" rx="4" fill="${color}"/>` : '') +
     '</svg>'
   )
 }
 
-/** A meter's fill by how full it is: the accent, then warning from 70%, critical from 90%. */
-const severity = (pct: number) => (pct >= 90 ? CRITICAL : pct >= 70 ? WARNING : INFO)
+// The Usage meters' own fill below 70%: the mod's purple, the one its icon wears. Its track is a light step of the
+// same purple: the dark purple itself, faded, vanished on a dark pane.
+const USAGE_FILL = '#4f049a'
+const USAGE_TRACK = '#b79be0'
+/** A meter's fill by how full it is: the purple, then warning from 70%, critical from 90%. */
+const severity = (pct: number) => (pct >= 90 ? CRITICAL : pct >= 70 ? WARNING : USAGE_FILL)
 
 const byNewest = (rows: Record<string, Tally>) => Object.entries(rows).sort(([, a], [, b]) => b.last - a.last)
 
@@ -738,7 +764,9 @@ export const register: Register = on => {
     // A subagent's call is what it is doing now: shown before it runs, so long calls show too.
     if (call.agentId) {
       const action = actionOf(call.tool, call)
+      const beat = await $.clock.now()
       await upsertAgent($, call.agentId, old => ({
+        beats: [...(old.beats ?? []), beat].slice(-BEATS),
         doing: action,
         trail: [...(old.trail ?? []), action].slice(-TRAIL),
         tools: old.tools + 1,
@@ -852,6 +880,9 @@ export const register: Register = on => {
     const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4
+    // One row tall, on the terminal only: elsewhere a row is as tall as its text, and a fixed height let text spill
+    // over the next card.
+    const H1 = Svg ? undefined : 1
     const px = (cols: number) => Math.max(40, Math.round(cols * PX_PER_COL))
     const used = await read($, usedAtom)
     const plan = await read($, planAtom)
@@ -861,8 +892,8 @@ export const register: Register = on => {
     const agents = [...(await read($, agentsAtom))].sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || b.seq - a.seq)
 
     const line = (key: string, left: unknown, right?: unknown) => (
-      <Box key={key} flexDirection="row" width={inner} height={1} gap={1}>
-        <Box flexGrow={1} flexShrink={1} height={1} overflow="hidden">
+      <Box key={key} flexDirection="row" width={inner} height={H1} gap={1}>
+        <Box flexGrow={1} flexShrink={1} height={H1} overflow="hidden">
           {left as never}
         </Box>
         {right ? <Box flexShrink={0}>{right as never}</Box> : null}
@@ -875,13 +906,18 @@ export const register: Register = on => {
     )
     const capped = (key: string, rows: unknown[]) =>
       rows.length > MAX_ROWS ? [...rows.slice(0, MAX_ROWS), note(`${key}-more`, `+${rows.length - MAX_ROWS} more`)] : rows
-    const block = (id: (typeof SECTIONS)[number], title: string, right: string, body: unknown) => {
+    // A section: its color on the border, the dot and the summary; the border dims while nothing in it is moving.
+    const block = (id: (typeof SECTIONS)[number], title: string, right: string, body: unknown, isActive = true) => {
       const shut = !Svg && folded.includes(id)
+      const tint = SECTION_COLOR[id]
       const head = Svg ? (
         <Box key="head" flexDirection="row" justifyContent="space-between" width={inner} marginBottom={1}>
-          <Text weight="semibold">{title}</Text>
+          <Text>
+            <Text color={tint}>● </Text>
+            <Text weight="semibold">{title}</Text>
+          </Text>
           {right ? (
-            <Text size="caption" color="subtle" tabular>
+            <Text size="caption" color={tint} tabular>
               {right}
             </Text>
           ) : null}
@@ -889,14 +925,14 @@ export const register: Register = on => {
       ) : (
         <Box key="head" flexDirection="row" justifyContent="space-between" width={inner}>
           <Button key={`sec-${id}`} plain onPress={() => undefined}>
-            <Text color="claude">{shut ? '▸ ' : '▾ '}</Text>
+            <Text color={tint}>{shut ? '▸ ' : '▾ '}</Text>
             <Text bold>{title}</Text>
           </Button>
-          {right ? <Text dimColor>{right}</Text> : null}
+          {right ? <Text color={tint}>{right}</Text> : null}
         </Box>
       )
       return (
-        <Box key={id} flexDirection="column" borderStyle="round" borderDimColor paddingX={1} paddingY={Svg ? 1 : 0} width={width} flexShrink={0}>
+        <Box key={id} flexDirection="column" borderStyle="round" borderColor={tint} borderDimColor={!isActive} paddingX={1} paddingY={Svg ? 1 : 0} width={width} flexShrink={0}>
           {head}
           {shut ? null : (body as never)}
         </Box>
@@ -907,7 +943,12 @@ export const register: Register = on => {
     // ---------- Usage ----------
     const now = usage.at || (await $.clock.now())
     const pctOf = (l: LimitRow) => Math.round(l.percent)
-    const tailOf = (l: LimitRow) => (l.resetsAt ? `in ${untilText(l.resetsAt - now)} · ${resetText(l.resetsAt, now)}` : '')
+    // A reading from an earlier session whose window has reset since says nothing about now.
+    const isOver = (l: LimitRow) => Boolean(l.asOf && l.resetsAt && l.resetsAt <= now)
+    const tailOf = (l: LimitRow) =>
+      isOver(l)
+        ? `reset at ${resetText(l.resetsAt, now)}`
+        : `${l.resetsAt ? `in ${untilText(l.resetsAt - now)} · ${resetText(l.resetsAt, now)}` : ''}${l.asOf ? `${l.resetsAt ? ' · ' : ''}as of ${hhmm(l.asOf)}` : ''}`
     const ctxPct = usage.contextWindow ? (usage.contextTokens / usage.contextWindow) * 100 : 0
     const ctxTail = `${kTokens(usage.contextTokens)} of ${kTokens(usage.contextWindow)}`
     const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
@@ -919,11 +960,12 @@ export const register: Register = on => {
       const tile = (key: string, label: string, l: LimitRow | null) => (
         <Box key={key} flexDirection="column" width={tileCols} flexShrink={0}>
           {note('label', label)}
-          <Text key="value" size="heading" weight="semibold" tabular>
-            {l ? `${pctOf(l)}%` : '–'}
+          <Text key="value" size="heading" weight="semibold" tabular dimColor={Boolean(l?.asOf)}>
+            {l && !isOver(l) ? `${pctOf(l)}%` : '–'}
           </Text>
-          {l ? <Svg key="bar" source={barSvg(l.percent / 100, severity(l.percent), px(tileCols), 8)} alt={`${label}: ${pctOf(l)}% used`} width={px(tileCols)} height={8} /> : null}
+          {l && !isOver(l) ? <Svg key="bar" source={barSvg(l.percent / 100, severity(l.percent), px(tileCols), 8, USAGE_TRACK)} alt={`${label}: ${pctOf(l)}% used`} width={px(tileCols)} height={8} /> : null}
           {note('reset', l ? tailOf(l) || ' ' : 'no reading yet')}
+          {l && isOver(l) ? note('next', 'new reading after the next reply') : null}
         </Box>
       )
       usageBody = [
@@ -934,7 +976,7 @@ export const register: Register = on => {
         usage.contextWindow ? (
           <Box key="ctx" flexDirection="column" width={inner} marginTop={1}>
             {line('ctx-figs', note('l', `Context · ${Math.round(ctxPct)}%`), note('r', ctxTail))}
-            <Svg key="bar" source={barSvg(ctxPct / 100, severity(ctxPct), px(inner), 8)} alt={`Context: ${Math.round(ctxPct)}% full`} width={px(inner)} height={8} />
+            <Svg key="bar" source={barSvg(ctxPct / 100, severity(ctxPct), px(inner), 8, USAGE_TRACK)} alt={`Context: ${Math.round(ctxPct)}% full`} width={px(inner)} height={8} />
           </Box>
         ) : null,
         <Box key="tok" flexDirection="column" width={inner} marginTop={1}>
@@ -963,7 +1005,7 @@ export const register: Register = on => {
               </Text>,
               tail ? <Text dimColor>{tail}</Text> : null,
             )}
-            <Box key={`${key}-bar`} width={inner} height={1} overflow="hidden">
+            <Box key={`${key}-bar`} width={inner} height={H1} overflow="hidden">
               <Text>
                 <Text color={severity(pct)}>{'█'.repeat(fill)}</Text>
                 <Text dimColor>{'░'.repeat(barCols - fill)}</Text>
@@ -973,7 +1015,7 @@ export const register: Register = on => {
         )
       }
       const limit = (key: string, label: string, l: LimitRow | null) =>
-        l ? meter(key, label, l.percent, tailOf(l)) : <Text key={key} dimColor>{`${label.padEnd(7)}no reading yet`}</Text>
+        l && !isOver(l) ? meter(key, label, l.percent, tailOf(l)) : <Text key={key} dimColor>{`${label.padEnd(7)}${l ? `${tailOf(l)}, new reading after the next reply` : 'no reading yet'}`}</Text>
       usageBody = [
         limit('l5', '5h', usage.fiveHour),
         limit('l7', '7d', usage.sevenDay),
@@ -1101,39 +1143,55 @@ export const register: Register = on => {
       [a.status === 'running' ? '' : a.status, a.model ? modelName(a.model) : '', plural(a.tools, 'tool'), a.tokens ? `${kTokens(a.tokens)} tokens` : '']
         .filter(Boolean)
         .join(' · ')
-    // Each agent is a card: who and how long, the facts, then its own to-do list with a bar, or else its latest steps.
-    const cardCols = inner - 4
-    const agentCard = (a: AgentRow) => {
+    // The run time: a live clock where the surface runs one (it ticks without a redraw), else the figure at this redraw.
+    const clock = (a: AgentRow) => {
+      if (!ranFor(a)) return null
+      const endAt = LIVE.has(a.status) ? null : (a.endedAt ?? null)
+      // The ticking clock runs where it is known to draw, the terminal; elsewhere the figure at this redraw.
+      return e.surface === 'terminal' && 'Client' in els ? (
+        <els.Client key={`clock:${a.id}`} module="./clock.tsx" props={{ since: a.startedAt, now: nowMs, endAt }} />
+      ) : (
+        <Text key={`clock:${a.id}`} size="caption" color="subtle" tabular>
+          {ranFor(a)}
+        </Text>
+      )
+    }
+    // One agent as a card `w` columns wide; a narrow card keeps the last two steps and its top three to-dos.
+    const agentCard = (a: AgentRow, w: number) => {
+      const cols = w - 4
+      const narrow = w < 40
       const isLive = LIVE.has(a.status)
       const steps = a.plan ?? []
       const stepsDone = steps.filter(st => st.status === 'completed').length
-      const trail = (a.trail?.length ? a.trail : a.doing ? [a.doing] : []).slice(isLive ? -5 : -1)
+      const trail = (a.trail?.length ? a.trail : a.doing ? [a.doing] : []).slice(isLive ? (narrow ? -2 : -5) : -1)
+      const barCols = Math.max(4, cols - 6)
+      const fillCols = steps.length ? Math.round((stepsDone / steps.length) * barCols) : 0
       const progress = steps.length
         ? [
-            <Box key="progress" flexDirection="row" width={cardCols} gap={1} marginTop={1}>
+            <Box key="progress" flexDirection="row" width={cols} gap={1} marginTop={1}>
               {Svg ? (
-                <Svg key="bar" source={barSvg(stepsDone / steps.length, ACCENT, px(cardCols - 6), 8)} alt={`${stepsDone} of ${steps.length} steps done`} width={px(cardCols - 6)} height={8} />
+                <Svg key="bar" source={barSvg(stepsDone / steps.length, ACCENT, px(barCols), 8)} alt={`${stepsDone} of ${steps.length} steps done`} width={px(barCols)} height={8} />
               ) : (
                 <Text key="bar">
-                  <Text color="claude">{'█'.repeat(Math.round((stepsDone / steps.length) * (cardCols - 7)))}</Text>
-                  <Text dimColor>{'░'.repeat(cardCols - 7 - Math.round((stepsDone / steps.length) * (cardCols - 7)))}</Text>
+                  <Text color="claude">{'█'.repeat(fillCols)}</Text>
+                  <Text dimColor>{'░'.repeat(barCols - fillCols)}</Text>
                 </Text>
               )}
               <Text size="caption" color="subtle" tabular>{`${stepsDone}/${steps.length}`}</Text>
             </Box>,
-            ...steps.slice(0, 8).map((st, i) => stepRow(st, i, cardCols)),
+            ...steps.slice(0, narrow ? 3 : 8).map((st, i) => stepRow(st, i, cols)),
           ]
         : trail.length
           ? [
-              <Box key="trail" flexDirection="column" width={cardCols} marginTop={isLive ? 1 : 0}>
+              <Box key="trail" flexDirection="column" width={cols} marginTop={isLive ? 1 : 0}>
                 {trail.map((step, i) => {
                   const isNow = isLive && i === trail.length - 1
                   return (
-                    <Box key={`t${i}`} flexDirection="row" width={cardCols} height={1}>
+                    <Box key={`t${i}`} flexDirection="row" width={cols} height={H1}>
                       <Box width={2} flexShrink={0}>
                         {isNow ? <Text color="claude">●</Text> : <Text color="success">✓</Text>}
                       </Box>
-                      <Box flexGrow={1} flexShrink={1} height={1} overflow="hidden">
+                      <Box width={cols - 2} flexShrink={0} height={H1} overflow="hidden">
                         <Text size="caption" mono wrap="truncate-end" color={isNow ? undefined : 'subtle'} bold={isNow}>
                           {step}
                         </Text>
@@ -1145,35 +1203,100 @@ export const register: Register = on => {
             ]
           : [note('trail', isLive ? 'Starting…' : 'No tool calls')]
       return (
-        <Box key={`a:${a.id}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1} width={inner} flexShrink={0}>
-          <Box key="who" flexDirection="row" width={cardCols} height={1} gap={1}>
-            <Box flexGrow={1} flexShrink={1} height={1} overflow="hidden">
+        <Box key={`a:${a.id}`} flexDirection="column" borderStyle="round" borderColor={isLive ? SECTION_COLOR.agents : undefined} borderDimColor={!isLive} paddingX={1} width={w} flexShrink={0}>
+          <Box key="who" flexDirection="row" width={cols} height={H1} gap={1}>
+            <Box flexGrow={1} flexShrink={1} height={H1} overflow="hidden">
               <Text wrap="truncate-end">
                 {mark(a.status)}
                 <Text weight="semibold">{` ${a.type}`}</Text>
               </Text>
             </Box>
-            {ranFor(a) ? (
-              <Box flexShrink={0}>
-                <Text size="caption" color="subtle" tabular>
-                  {ranFor(a)}
-                </Text>
-              </Box>
-            ) : null}
+            <Box flexShrink={0}>{clock(a) as never}</Box>
           </Box>
-          {a.description ? (
-            <Text key="task" wrap="truncate-end" dimColor={!isLive}>
-              {a.description}
-            </Text>
-          ) : null}
+          {a.description
+            ? wrap(a.description, cols)
+                .slice(0, narrow ? 2 : 1)
+                .map((l, i) => (
+                  <Text key={`task${i}`} wrap="truncate-end" dimColor={!isLive}>
+                    {l}
+                  </Text>
+                ))
+            : null}
           {note('facts', facts(a))}
           {progress as never}
         </Box>
       )
     }
-    const agentBody = agents.length
-      ? capped('agents', agents.map(agentCard))
-      : note('none', 'No agents yet')
+    // More than three agents: one activity lane each on a shared time axis. A bar's height is how many calls the agent
+    // made in that slice of time, so a lane shows when each one was busy, idle or done, side by side with the others.
+    const lanes = () => {
+      const t0 = Math.min(...agents.map(a => a.startedAt || nowMs))
+      const span = Math.max(1000, nowMs - t0)
+      const nameCols = Math.min(16, Math.max(8, Math.floor(inner / 4)))
+      const laneCols = Math.max(8, inner - 2 - nameCols - 9 - 2)
+      const slot = (ms: number) => Math.min(laneCols - 1, Math.max(0, Math.floor(((ms - t0) / span) * laneCols)))
+      const rows = agents.map(a => {
+        const counts = new Array<number>(laneCols).fill(0)
+        for (const b of a.beats ?? []) counts[slot(b)]! += 1
+        const from = a.startedAt ? slot(a.startedAt) : 0
+        const to = LIVE.has(a.status) ? laneCols - 1 : a.endedAt ? slot(a.endedAt) : laneCols - 1
+        return { a, counts, from, to }
+      })
+      const peak = Math.max(1, ...rows.flatMap(r => r.counts))
+      const level = (n: number) => LEVELS[Math.min(LEVELS.length - 1, Math.ceil((n / peak) * (LEVELS.length - 1)))]!
+      const laneSvg = (r: (typeof rows)[number]) => {
+        const cell = px(laneCols) / laneCols
+        const bars = r.counts
+          .map((n, i) => {
+            if (i < r.from || i > r.to) return ''
+            const h = n ? Math.max(3, Math.round((n / peak) * 14)) : 1
+            return `<rect x="${(i * cell).toFixed(1)}" y="${16 - h}" width="${Math.max(1, cell - 1).toFixed(1)}" height="${h}" rx="1" fill="${n ? INFO : '#80808060'}"/>`
+          })
+          .join('')
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${px(laneCols)} 16" width="${px(laneCols)}" height="16">${bars}</svg>`
+      }
+      return [
+        ...rows.map(r => (
+          <Box key={`lane:${r.a.id}`} flexDirection="row" width={inner} gap={1} height={Svg ? undefined : 1} flexShrink={0}>
+            <Box width={2} flexShrink={0}>
+              {mark(r.a.status)}
+            </Box>
+            <Box width={nameCols} flexShrink={0} overflow="hidden" height={H1}>
+              <Text wrap="truncate-end" weight="medium" dimColor={!LIVE.has(r.a.status)}>
+                {r.a.description || r.a.type}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} overflow="hidden" height={Svg ? undefined : 1}>
+              {Svg ? (
+                <Svg source={laneSvg(r)} alt={`${r.a.description || r.a.type}: ${plural(r.a.tools, 'tool call')}`} width={px(laneCols)} height={16} />
+              ) : (
+                <Text>
+                  {r.counts.map((n, i) => (
+                    <Text key={`c${i}`} color={n ? 'suggestion' : undefined} dimColor={!n}>
+                      {i < r.from || i > r.to ? ' ' : n ? level(n) : '·'}
+                    </Text>
+                  ))}
+                </Text>
+              )}
+            </Box>
+            <Box flexShrink={0}>{clock(r.a) as never}</Box>
+          </Box>
+        )),
+        note('lanes-key', `Busy over the last ${runText(span)}: the taller the bar, the more calls in that moment.`),
+      ]
+    }
+    const cardsAcross = Math.min(3, Math.max(1, Math.floor((inner + 1) / (MIN_CARD + 1))))
+    const agentBody = !agents.length
+      ? note('none', 'No agents yet')
+      : agents.length > 3
+        ? lanes()
+        : agents.length > 1 && cardsAcross >= agents.length
+          ? [
+              <Box key="cards" flexDirection="row" width={inner} gap={1}>
+                {agents.map(a => agentCard(a, Math.floor((inner - (agents.length - 1)) / agents.length)))}
+              </Box>,
+            ]
+          : agents.map(a => agentCard(a, inner))
 
     // ---------- Skills ----------
     const skills = byNewest(used.skills)
@@ -1195,14 +1318,72 @@ export const register: Register = on => {
         )
       : nothing
 
+    // The line on top: what the chat is doing right now, in one glance.
+    const running = agents.filter(a => a.status === 'running').length
+    const current = plan.steps.find(st => st.status === 'in_progress')
+    const isWorking = Boolean(current) || running > 0
+    const headline = current
+      ? current.active || current.text
+      : plan.steps.length && done === plan.steps.length
+        ? `Done: ${plan.title || 'every step'}`
+        : running
+          ? `${plural(running, 'agent')} at work`
+          : 'Waiting for the next job'
+    const aside = [current && running ? plural(running, 'agent') : '', usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : ''].filter(Boolean).join(' · ')
+    const totalCalls = conns.reduce((n, [, t]) => n + t.count, 0)
+    const pctDone = plan.steps.length ? Math.round((done / plan.steps.length) * 100) : 0
+    const limits = [usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : '', usage.sevenDay ? `7d ${pctOf(usage.sevenDay)}%` : ''].filter(Boolean).join(' · ')
+
     return (
       <Box flexDirection="column" width={width} gap={Svg ? 1 : 0}>
-        {block('usage', 'Usage', '', usageBody)}
-        {block('todo', 'To-do', plan.steps.length ? `${done} of ${plan.steps.length}` : '', todoBody)}
-        {block('files', 'Context files', String(files.length), fileBody)}
-        {block('connectors', 'Connectors', String(conns.length), connBody)}
-        {block('agents', 'Agents', agents.length ? `${live} active of ${agents.length}` : '0', agentBody)}
-        {block('skills', 'Skills', String(skills.length), skillBody)}
+        {Svg ? (
+          <Box key="now" flexDirection="column" width={width} paddingX={1}>
+            <Box key="now-top" flexDirection="row" justifyContent="space-between" width={width - 2}>
+              <Text color={isWorking ? 'claude' : 'subtle'} weight="semibold">
+                {isWorking ? '▶ NOW' : '■ IDLE'}
+              </Text>
+              {aside ? (
+                <Text size="caption" color="subtle" tabular>
+                  {aside}
+                </Text>
+              ) : null}
+            </Box>
+            {wrap(headline, width - 2)
+              .slice(0, 2)
+              .map((l, i) => (
+                <Text key={`now${i}`} weight="medium" dimColor={!isWorking} wrap="truncate-end">
+                  {l}
+                </Text>
+              ))}
+          </Box>
+        ) : (
+          <Box key="now" flexDirection="row" width={width} paddingX={1} gap={1} height={1}>
+            <Box flexShrink={0}>
+              <Text color={isWorking ? 'claude' : 'subtle'} weight="semibold">
+                {isWorking ? '▶ NOW' : '■ IDLE'}
+              </Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1} height={1} overflow="hidden">
+              <Text wrap="truncate-end" weight="medium" dimColor={!isWorking}>
+                {headline}
+              </Text>
+            </Box>
+            {aside ? (
+              <Box flexShrink={0}>
+                <Text size="caption" color="subtle" tabular>
+                  {aside}
+                </Text>
+              </Box>
+            ) : null}
+          </Box>
+        )}
+        {block('usage', 'Usage', limits, usageBody)}
+        {/* Sections with nothing to show take no room. */}
+        {plan.steps.length ? block('todo', 'To-do', `${done}/${plan.steps.length} · ${pctDone}%`, todoBody, done < plan.steps.length) : null}
+        {files.length ? block('files', 'Context files', plural(files.length, 'file'), fileBody) : null}
+        {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
+        {agents.length ? block('agents', 'Agents', `${live} running · ${agents.length - live} done`, agentBody, live > 0) : null}
+        {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
       </Box>
     )
   })

@@ -13,7 +13,7 @@ const BAND = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 100 
 /** Keys a path the same wherever the mod thinks home is: everything from /.claude/ on. */
 const key = (p: string) => (p.includes('/.claude/') ? `~${p.slice(p.indexOf('/.claude/'))}` : p)
 
-type World = { files?: Record<string, string>; opened?: string[]; history?: unknown[] | (() => Promise<unknown[]>) }
+type World = { files?: Record<string, string>; opened?: string[]; history?: unknown[] | (() => Promise<unknown[]>); noLimits?: boolean }
 
 /** Answers every $ call the mod makes, from a fake disk and a fixed session. */
 function world(on: On, w: World = {}) {
@@ -39,7 +39,7 @@ function world(on: On, w: World = {}) {
             skills: { totalSkills: 1, includedSkills: 1, tokens: 10, skillFrontmatter: [{ name: 'release-notes', source: 'userSettings', tokens: 10 }] },
           },
         },
-        rateLimits: [
+        rateLimits: w.noLimits ? [] : [
           { kind: 'five_hour', percentUsed: 11, resetsAt: new Date(1_000_000 + 135 * 60000).toISOString() },
           { kind: 'seven_day', percentUsed: 6, resetsAt: new Date(1_000_000 + (3 * 1440 + 23 * 60) * 60000).toISOString() },
         ],
@@ -137,10 +137,13 @@ for (const surface of SURFACES) {
       await clock.settle()
       const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
       expect((await ui.findAll({ type: 'Button' })).length, 'a desktop Button is a green native button').toBe(0)
+      const fixed = (await ui.findAll({ type: 'Box' })).filter(b => b.props.height === 1)
+      expect(fixed.length, 'no one-row heights off the terminal: text taller than a row spilled over the next card').toBe(0)
       expect(await ui.find({ text: /↳ search issues · login bug/ }), 'the latest call shows without a press').toBeDefined()
       expect((await ui.findAll({ type: 'Svg' })).length, 'the 5h, 7d and context bars are pictures').toBe(3)
       const titles = (await ui.findAll({ type: 'Text', text: /^(Usage|To-do|Context files|Connectors|Agents|Skills)$/ })).map(t => String(t.text))
-      expect(titles, 'the sections in order').toEqual(['Usage', 'To-do', 'Context files', 'Connectors', 'Agents', 'Skills'])
+      expect(titles, 'the sections in order, the empty ones (To-do, Agents) left out').toEqual(['Usage', 'Context files', 'Connectors', 'Skills'])
+      expect(await ui.find({ text: /^▶ NOW$|^■ IDLE$/ }), 'the line on top').toBeDefined()
     })
 
   if (surface === 'terminal')
@@ -185,7 +188,8 @@ for (const surface of SURFACES) {
     await $.session.start({ ...START, surface } as never)
     await clock.settle()
     let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect((await ui.find({ type: 'Text', text: /^No to-do list yet\./ }))?.props.dimColor, 'the empty line, dim').toBe(true)
+    expect(await ui.find({ type: 'Text', text: /^To-do$/ }), 'no list, no section').toBeUndefined()
+    expect(await ui.find({ text: /^■ IDLE$/ }), 'idle on top').toBeDefined()
     await ui.unmount()
 
     await ($.tool.call as unknown as Call)({
@@ -199,10 +203,11 @@ for (const surface of SURFACES) {
     })
     await clock.settle()
     ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ type: 'Text', text: /^1 of 3$/ }), 'count').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^1\/3 · 33%$/ }), 'count').toBeDefined()
+    expect(await ui.find({ text: /^Building the parser$/ }), 'the step in progress is the headline').toBeDefined()
     for (const m of [/^✓$/, /^●$/, /^○$/]) expect((await ui.findAll({ type: 'Text', text: m })).length, `${m} once`).toBe(1)
     expect((await ui.find({ type: 'Text', text: /^Sketch the schema$/ }))?.props.strikethrough, 'done is struck through').toBe(true)
-    expect((await ui.find({ type: 'Text', text: /^Building the parser$/ }))?.props.bold, 'the running step, in its -ing form').toBe(true)
+    expect((await ui.findAll({ type: 'Text', text: /^Building the parser$/ })).some(t => t.props.bold), 'the running step, in its -ing form').toBe(true)
   })
 
   test(`TaskCreate adds steps and TaskUpdate moves them (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -228,7 +233,16 @@ for (const surface of SURFACES) {
     await call({ tool: 'Read', tool_use_id: 'g2', agentId: 'ag1', file_path: '/home/dev/project/auth.ts' })
     await clock.advance(65_000)
     let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    for (const t of [/Explore/, /Find the auth code/, /Read auth\.ts/, /Opus · 2 tools$/, /^1m 05s$/, /1 active of 1/]) expect(await ui.find({ text: t }), `${t}`).toBeDefined()
+    for (const t of [/Explore/, /Find the auth code/, /Read auth\.ts/, /Opus · 2 tools$/, /^1 running · 0 done$/]) expect(await ui.find({ text: t }), `${t}`).toBeDefined()
+    if (surface === 'terminal') {
+      const live = (await ui.find({ type: 'Client' }))?.props as { module: string; props: { since: number; now: number; endAt: number | null } } | undefined
+      expect(live?.module, 'a live clock').toMatch(/clock\.tsx$/)
+      expect(live?.props.now - (live?.props.since ?? 0), 'it reads 65 s, then ticks by itself').toBe(65_000)
+      expect(live?.props.endAt, 'still running').toBeNull()
+    } else {
+      expect(await ui.find({ type: 'Client' }), 'no Client off the terminal: VS Code draws none').toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: /^1m 05s$/ }), 'the time as text').toBeDefined()
+    }
     await ui.unmount()
 
     const usage = { model: 'claude-opus-5-5', input_tokens: 200, output_tokens: 800, cache_read_input_tokens: 150, cache_creation_input_tokens: 50 }
@@ -236,8 +250,11 @@ for (const surface of SURFACES) {
     await clock.advance(30_000)
     ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ text: /completed · Opus 5\.5 · 2 tools · 1\.2k tokens/ }), 'done, with the exact model and its tokens').toBeDefined()
-    expect(await ui.find({ text: /^1m 05s$/ }), 'the run time stops at the end').toBeDefined()
-    expect(await ui.find({ text: /0 active of 1/ }), 'none active').toBeDefined()
+    if (surface === 'terminal') {
+      const ended = (await ui.find({ type: 'Client' }))?.props as { props: { since: number; endAt: number | null } } | undefined
+      expect((ended?.props.endAt ?? 0) - (ended?.props.since ?? 0), 'the run time stops at the end').toBe(65_000)
+    } else expect(await ui.find({ type: 'Text', text: /^1m 05s$/ }), 'the run time stops at the end').toBeDefined()
+    expect(await ui.find({ text: /^0 running · 1 done$/ }), 'none running').toBeDefined()
   })
 
   test(`each agent is a card: its steps as a trail, or its own to-do list with a count (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -264,8 +281,36 @@ for (const surface of SURFACES) {
     ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ type: 'Text', text: /^1\/2$/ }), 'its own count').toBeDefined()
     expect(await ui.find({ text: /Checking the token expiry/ }), 'its step in progress').toBeDefined()
-    expect(await ui.find({ text: /No to-do list yet/ }), "the main chat's list is untouched").toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^To-do$/ }), "the main chat's list is untouched").toBeUndefined()
     if (surface === 'desktop') expect((await ui.findAll({ type: 'Svg' })).some(v => String(v.props.alt) === '1 of 2 steps done'), 'its bar').toBe(true)
+  })
+
+  test(`two agents sit side by side; more than three become activity lanes (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const clock = world(on)
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    const call = $.tool.call as unknown as Call
+    await call({ tool: 'Grep', tool_use_id: 'x1', agentId: 'w1', pattern: 'a' })
+    await call({ tool: 'Grep', tool_use_id: 'x2', agentId: 'w2', pattern: 'b' })
+    await clock.settle()
+    const wide = { ...(PANE as object), bodyColumns: 64 } as never
+    let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: wide })
+    expect(await ui.find({ key: 'cards' }), 'two cards in one row').toBeDefined()
+    expect(await ui.find({ key: 'lane:w1' }), 'no lanes yet').toBeUndefined()
+    await ui.unmount()
+
+    for (const id of ['w3', 'w4', 'w5']) {
+      await clock.advance(5000)
+      await call({ tool: 'Read', tool_use_id: `r-${id}`, agentId: id, file_path: `/home/dev/project/${id}.ts` })
+    }
+    await call({ tool: 'Grep', tool_use_id: 'x3', agentId: 'w5', pattern: 'c' })
+    await clock.settle()
+    ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: wide })
+    for (const id of ['w1', 'w2', 'w3', 'w4', 'w5']) expect(await ui.find({ key: `lane:${id}` }), `a lane for ${id}`).toBeDefined()
+    expect(await ui.find({ key: 'cards' }), 'no cards row').toBeUndefined()
+    expect(await ui.find({ text: /^Busy over the last 15s/ }), 'what the lanes measure').toBeDefined()
+    if (surface === 'desktop') expect((await ui.findAll({ type: 'Svg' })).filter(v => /tool call/.test(String(v.props.alt))).length, 'one picture per lane').toBe(5)
+    else expect(await ui.find({ text: /^█$/ }), 'the busiest moment is a full bar').toBeDefined()
   })
 
   test(`a workflow agent, never in the agent list, stays running (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -275,7 +320,7 @@ for (const surface of SURFACES) {
     await ($.tool.call as unknown as Call)({ tool: 'Grep', tool_use_id: 'w1', agentId: 'wf1', pattern: 'todo' })
     await clock.advance(7000)
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ text: /1 active of 1/ }), 'still running after two list checks').toBeDefined()
+    expect(await ui.find({ text: /^1 running · 0 done$/ }), 'still running after two list checks').toBeDefined()
   })
 
   test(`after a reload a new agent sorts above older ones (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -340,7 +385,7 @@ for (const surface of SURFACES) {
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ text: /Fix it/ }), 'the title').toBeDefined()
-    expect(await ui.find({ text: /^1 of 3$/ }), 'the subagent changed nothing').toBeDefined()
+    expect(await ui.find({ text: /^1\/3 · 33%$/ }), 'the subagent changed nothing').toBeDefined()
     expect(await ui.find({ text: /Whatishappening/ }), 'the plan tool is not a connector').toBeUndefined()
   })
 
@@ -362,6 +407,25 @@ for (const surface of SURFACES) {
     await submit({ text: 'next job' })
     expect(notes(await call({ tool: 'Read', tool_use_id: 'n4', file_path: '/x/c.ts' })), 'a live plan').toContain('is from an earlier prompt')
     expect(notes(await call({ tool: 'Grep', tool_use_id: 's1', agentId: 'ag1', pattern: 'x' })), 'none for a subagent').toBe('')
+  })
+
+  test(`a new session shows the limits an earlier one saw, marked with their time, until its own reading (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const kept = {
+      fiveHour: { percent: 7, resetsAt: 1_000_000 + 90 * 60000 },
+      sevenDay: { percent: 8, resetsAt: 1_000_000 - 60000 },
+      at: 1_000_000 - 30 * 60000,
+    }
+    on('store.get', async ($, e) => ({ value: (e as { key: string }).key === 'limits' ? kept : undefined }) as never)
+    on('store.set', async () => ({ value: undefined }) as never)
+    // This session has no reading of its own yet.
+    const clock = world(on, { noLimits: true })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
+    expect(await ui.find({ text: /^7%$/ }), 'the kept 5h reading').toBeDefined()
+    expect(await ui.find({ text: /as of \d\d:\d\d/ }), 'marked with when it was taken').toBeDefined()
+    expect(await ui.find({ text: /^8%$/ }), 'a 7d reading whose window reset since is not shown').toBeUndefined()
+    expect(await ui.find({ text: /reset at/ }), 'it says the window reset').toBeDefined()
   })
 
   test(`a finished plan stays at 100% for 20 s, then leaves the band (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

@@ -69,6 +69,8 @@ export type AgentRow = {
   trail?: string[]
   /** Its own to-do list, when it keeps one (TodoWrite, TaskCreate or the plan tool). */
   plan?: PlanStep[]
+  /** When it made its latest tool calls, oldest first, for its activity lane. */
+  beats?: number[]
 }
 
 /** One rate-limit window. */
@@ -77,6 +79,8 @@ export type LimitRow = {
   percent: number
   /** Epoch milliseconds, or 0 when not known. */
   resetsAt: number
+  /** Set on a reading kept from an earlier session: when it was taken. */
+  asOf?: number
 }
 
 export type UsageView = {

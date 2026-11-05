@@ -14,6 +14,11 @@ A long Claude Code session hides a lot: how close you are to the usage limit, wh
 
 ## Features
 
+### At a glance
+- **The NOW line** on top says what is happening this second: the step Claude is on, how many agents are at work and the 5-hour usage. With nothing running it reads IDLE.
+- **Each section has its own color,** from your Claude Code theme, so light, dark and colorblind themes all read. Its header carries a summary (`2/4 · 50%`, `2 running · 1 done`), and its border dims while nothing in it moves.
+- **Sections with nothing to show take no room.**
+
 ### Usage
 - **5-hour and 7-day limits:** the percentage used, a bar that turns amber at 70% and red at 90%, the time left and the exact reset time (`in 2h15 · 14:30`).
 - **Context:** how full the context window is.
@@ -30,7 +35,7 @@ Every subagent the chat starts gets a card of its own, live ones first:
 
 ```
 ╭──────────────────────────────────────────╮
-│ ● Explore                         1m 05s │
+│ ● Explore                       ◐ 1m 05s │
 │ Find the auth code                       │
 │ Opus 5.5 · 6 tools · 12.4k tokens        │
 │                                          │
@@ -40,11 +45,21 @@ Every subagent the chat starts gets a card of its own, live ones first:
 ╰──────────────────────────────────────────╯
 ```
 
-- **Top of the card:** the agent type, its task and how long it has run, or ran.
-- **Facts:** the model it runs on, how many tool calls it made and the tokens it spent.
-- **Latest steps:** ✓ marks the steps it finished and ● the one it is on.
-- **Its own to-do list:** when the agent keeps one (TodoWrite, the Task tools or the plan tool), the card shows that list with a progress bar instead of the steps. An agent does not say in advance how many steps it will take, so there is no made-up percentage.
-- **Finished agents:** the card shrinks to its last step.
+- **Top of the card:** the agent type and how long it has run, then its task. In the terminal the clock ticks by itself.
+- **Facts:** the model, how many tool calls it made and the tokens it spent.
+- **Latest steps:** ✓ for the ones it finished, ● for the one it is on.
+- **Its own to-do list:** when the agent keeps one (TodoWrite, the Task tools or the plan tool), the card shows that list with a progress bar instead. An agent does not say in advance how many steps it will take, so there is no made-up percentage.
+- **Layout:**
+  - two or three agents sit side by side when the pane is wide enough;
+  - with more than three, each agent gets an **activity lane** on a shared time axis.
+
+```
+● Map the hooks     ▂▅█▇▃·····              ◐ 0m 42s
+✓ Review README     ▃▆▄▂                       0m 18s
+● Count tests          ·▁▃▅▇█▆▃▁            ◐ 0m 31s
+```
+
+A bar's height is how many calls the agent made in that moment, so you can see who is busy, who is waiting and who is done.
 
 Agents started by workflows show too.
 

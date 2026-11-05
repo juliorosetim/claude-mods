@@ -4,6 +4,18 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-05
+
+- **NOW line** on top of the pane: the step Claude is on, how many agents are at work and the 5-hour usage, or IDLE when nothing runs.
+- **A color per section** (Usage blue, To-do orange, Context files purple, Connectors green, Agents indigo, Skills amber), from the Claude Code theme, on its border, its dot and its summary. A section's border dims while nothing in it moves.
+- **Summaries in each header:** `5h 2% · 7d 8%`, `2/4 · 50%`, `3 · 38 calls`, `2 running · 1 done`.
+- **Empty sections take no room.**
+- The Usage bars fill in the mod's purple, `#4f049a`, until 70%.
+- A new session shows the 5-hour and 7-day limits right away, from the latest reading any session saw, marked `as of 15:02` until its own first reply. A window that has reset since shows `reset at 18:20` instead of an old number.
+- **Live agent clocks** in the terminal, ticking each second by themselves with a turning mark while the agent works. The desktop app and VS Code show the time at each redraw.
+- **Agents side by side:** two or three agents sit in one row when the pane is wide enough.
+- **Activity lanes:** with more than three agents, each one gets a lane on a shared time axis, and its bars show how many calls it made in each moment.
+
 ## 0.1.1 - 2026-11-05
 
 - New look on desktop and VS Code: section titles instead of native buttons, the 5-hour and 7-day limits as two tiles with rounded bars, and the latest call under each connector.
