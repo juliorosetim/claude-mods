@@ -97,6 +97,22 @@ export type UsageView = {
   at: number
 }
 
+/** One earlier Claude Code session. */
+export type SessionRow = {
+  id: string
+  /** Its title as Claude Code named it (or the person renamed it); '' when it has none yet. */
+  title: string
+  /** When its transcript last changed, epoch milliseconds. */
+  at: number
+}
+
+/** The recent sessions, grouped by the folder each ran in, the most recent folder first. */
+export type SessionList = {
+  groups: { cwd: string; items: SessionRow[] }[]
+  /** When the list was read; 0 before the first read. */
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'whatishappening': {
@@ -108,6 +124,10 @@ declare module 'claude-code' {
       open: string
       /** Sections the person closed. */
       folded: string[]
+      /** The recent sessions the Sessions pane lists. */
+      sessions: SessionList
+      /** The session from another folder whose resume command is shown; '' for none. */
+      shown: string
     }
   }
 }

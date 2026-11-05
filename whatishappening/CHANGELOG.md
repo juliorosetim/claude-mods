@@ -4,6 +4,11 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.3.0 - 2026-11-05
+
+- **`/sessions`** opens a Sessions pane: your recent Claude Code sessions grouped by the folder each ran in, this folder first, each with its title (or its first prompt) and how long ago it ran.
+- Press a session of this folder to get `/resume <id>` in the prompt box, one Enter away. A session of another folder shows the command to run in a terminal, `cd <folder> && claude --resume <id>`, since `/resume` only finds the sessions of the folder Claude Code started in.
+
 ## 0.2.0 - 2026-11-05
 
 - **NOW line** on top of the pane: the step Claude is on, how many agents are at work and the 5-hour usage, or IDLE when nothing runs.

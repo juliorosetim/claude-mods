@@ -1,6 +1,6 @@
 {
   "name": "whatishappening",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A side pane, What is happening, with usage limits, session tokens, the task plan, the agents at work and what each is doing, connectors, context files and skills, plus a task progress band above the prompt",
   "license": "MIT",
   "author": {

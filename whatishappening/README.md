@@ -72,6 +72,13 @@ Every section folds with its header.
 
 ![The pane in VS Code](../docs/vscode.png)
 
+### Sessions
+`/sessions` opens a second pane with your recent sessions, grouped by the folder each one ran in, this folder first. Each row has the session's title, or its first prompt, and how long ago it ran. The chat you are in is marked.
+
+- **A session of this folder:** press it, and `/resume <id>` lands in the prompt box. Press Enter to pick it up.
+- **A session of another folder:** `/resume` only finds the sessions of the folder Claude Code started in, so the pane shows the command to run in a terminal instead: `cd <folder> && claude --resume <id>`.
+- **↻** reads the list again.
+
 ## Install
 
 In Claude Code:

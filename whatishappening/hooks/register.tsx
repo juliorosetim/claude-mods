@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { AgentRow, CallRow, LimitRow, Plan, PlanStep, Tally, UsageView, Used } from '../types'
+import type { AgentRow, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, Tally, UsageView, Used } from '../types'
 
 const PLUGIN = 'whatishappening'
 const PANE = 'whatishappening'
@@ -86,6 +86,13 @@ const foldedAtom = atom({ plugin: 'whatishappening', key: 'folded' } as const, [
 const agentsAtom = atom({ plugin: 'whatishappening', key: 'agents' } as const, [] as AgentRow[])
 const NO_USAGE: UsageView = { fiveHour: null, sevenDay: null, contextTokens: 0, contextWindow: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, at: 0 }
 const usageAtom = atom({ plugin: 'whatishappening', key: 'usage' } as const, NO_USAGE)
+const NO_SESSIONS: SessionList = { groups: [], at: 0 }
+const sessionsAtom = atom({ plugin: 'whatishappening', key: 'sessions' } as const, NO_SESSIONS)
+// The session whose resume command is shown (one from another folder); '' for none.
+const shownAtom = atom({ plugin: 'whatishappening', key: 'shown' } as const, '')
+const SESSIONS_PANE = 'whatishappening-sessions'
+const MAX_SESSIONS = 60
+const PER_FOLDER = 8
 
 // Module variables start over on a reload; what must last lives in $.state.
 let home = ''
@@ -611,6 +618,82 @@ const USAGE_TRACK = '#b79be0'
 /** A meter's fill by how full it is: the purple, then warning from 70%, critical from 90%. */
 const severity = (pct: number) => (pct >= 90 ? CRITICAL : pct >= 70 ? WARNING : USAGE_FILL)
 
+// ---------- other sessions ----------
+
+// One line per session file, newest first: modified time, path, its first cwd, its latest title and its first prompt.
+// grep reads the files where $.fs.read would refuse a long one, and only the two fields come back.
+const SESSIONS_SH = [
+  'cd "$1" 2>/dev/null || exit 0',
+  `find . -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@\\t%p\\n' | sort -rn | head -n ${MAX_SESSIONS} |`,
+  'while IFS="$(printf \'\\t\')" read -r t f; do',
+  '  c=$(grep -m1 -o \'"cwd":"[^"]*"\' "$f")',
+  '  n=$(grep -o \'"\\(aiTitle\\|customTitle\\)":"[^"]*"\' "$f" | tail -n 1)',
+  // With no title yet, the first prompt the person typed (one that opens with "<" is a command's record).
+  '  u=$(grep -m1 -o \'"role":"user","content":"[^"<][^"]*"\' "$f" | cut -c1-300 | sed \'s/^"role":"user",//\')',
+  '  printf \'%s\\t%s\\t%s\\t%s\\t%s\\n\' "$t" "$f" "$c" "$n" "$u"',
+  'done',
+].join('\n')
+
+/** The sessions in the script's output, grouped by the folder each ran in, the most recent folder first. */
+export function sessionGroups(out: string): SessionList['groups'] {
+  const field = (pair: string) => {
+    try {
+      return Object.values(JSON.parse(`{${pair}}`) as Record<string, string>)[0] ?? ''
+    } catch {
+      return ''
+    }
+  }
+  const byFolder = new Map<string, SessionRow[]>()
+  for (const row of out.split('\n')) {
+    const [t = '', path = '', cwd = '', title = '', prompt = ''] = row.split('\t')
+    const id = /([0-9a-f-]{36})\.jsonl$/.exec(path)?.[1]
+    const folder = field(cwd)
+    if (!id || !folder) continue
+    const list = byFolder.get(folder) ?? []
+    // A prompt cut at 300 characters may end inside an escape: then it is read as written, unescaped by hand.
+    const first = field(prompt) || prompt.replace(/^"content":"/, '').replace(/"$/, '').replace(/\\n/g, ' ')
+    list.push({ id, title: field(title) || short(first, 60), at: Math.round(Number(t) * 1000) || 0 })
+    byFolder.set(folder, list)
+  }
+  return [...byFolder].map(([cwd, items]) => ({ cwd, items: items.sort((a, b) => b.at - a.at) })).sort((a, b) => (b.items[0]?.at ?? 0) - (a.items[0]?.at ?? 0))
+}
+
+async function loadSessions($: EngineInterface) {
+  try {
+    const out = (await $.process.run(['sh', '-c', SESSIONS_SH, 'sh', `${home}/.claude/projects`])).stdout
+    const at = await $.clock.now()
+    await update($, sessionsAtom, () => ({ groups: sessionGroups(out), at }))
+  } catch (err) {
+    await logError($, 'sessions', err)
+  }
+}
+
+/** A session of this folder: `/resume <id>` in the prompt box, one Enter away. Another folder's: its command, shown. */
+async function pickSession($: EngineInterface, id: string) {
+  const list = await read($, sessionsAtom)
+  const cwd = await $.session.cwd()
+  const group = list.groups.find(g => g.items.some(it => it.id === id))
+  if (group?.cwd === cwd) {
+    await $.prompt.fill({ text: `/resume ${id}` })
+    try {
+      $.ui.toast('Press Enter to pick that session up.')
+    } catch {
+      // The toast is only a hint.
+    }
+    return
+  }
+  await update($, shownAtom, cur => (cur === id ? '' : id))
+}
+
+/** "4m", "3h", "8d", "2mo": how long ago. */
+function ageText(ms: number): string {
+  const min = Math.max(0, Math.floor(ms / 60000))
+  if (min < 60) return `${min}m`
+  if (min < 1440) return `${Math.floor(min / 60)}h`
+  if (min < 43200) return `${Math.floor(min / 1440)}d`
+  return `${Math.floor(min / 43200)}mo`
+}
+
 const byNewest = (rows: Record<string, Tally>) => Object.entries(rows).sort(([, a], [, b]) => b.last - a.last)
 
 export const register: Register = on => {
@@ -653,6 +736,7 @@ export const register: Register = on => {
       })
       .catch(err => logError($, 'register plan tool', err))
     await $.command.register({ name: 'whatishappening', description: 'Show what this chat is doing: usage, tasks, agents, connectors, files and skills', immediate: true })
+    await $.command.register({ name: 'sessions', description: 'List your recent Claude Code sessions by folder, to pick one up again', immediate: true })
     if (!syncTimer) syncTimer = $.clock.every(3000, () => void syncAgents($))
     // Every 30 s: limits move, the countdowns tick and the tokens are read again, so a long first turn shows them too.
     if (!usageTimer) usageTimer = $.clock.every(30000, () => void refreshUsage($, true))
@@ -665,6 +749,12 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('command.run', { command: 'sessions' }, async $ => {
+    await loadSessions($)
+    await $.ui.open({ id: SESSIONS_PANE, title: 'Sessions' })
+    return { text: 'Opened the Sessions pane.' }
+  })
+
   on('command.run', { command: 'whatishappening' }, async $ => {
     await $.ui.open({ id: PANE, title: TITLE })
     return { text: 'Opened the What is happening pane.' }
@@ -674,7 +764,7 @@ export const register: Register = on => {
   on('command.run', async ($, e, next) => {
     const ran = await next(e)
     try {
-      if (e.command !== 'whatishappening' && skillNames.has(e.command)) await note($, '', [{ kind: 'skills', name: e.command }])
+      if (e.command !== 'whatishappening' && e.command !== 'sessions' && skillNames.has(e.command)) await note($, '', [{ kind: 'skills', name: e.command }])
     } catch (err) {
       await logError($, 'command', err)
     }
@@ -815,6 +905,10 @@ export const register: Register = on => {
     } else if (el.startsWith('c:')) {
       const name = el.slice(2)
       await update($, openAtom, cur => (cur === name ? '' : name))
+    } else if (el === 'sess-refresh') {
+      await loadSessions($)
+    } else if (el.startsWith('sess:')) {
+      await pickSession($, el.slice(5))
     }
     return { element: el }
   })
@@ -1384,6 +1478,98 @@ export const register: Register = on => {
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', `${live} running · ${agents.length - live} done`, agentBody, live > 0) : null}
         {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
+      </Box>
+    )
+  })
+  // The Sessions pane: recent sessions grouped by folder, this folder first. A press picks one up (see pickSession).
+  on('ui.render', { component: 'Pane', requestId: SESSIONS_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const width = Math.max(24, e.props.bodyColumns)
+    const inner = width - 4
+    const H1 = e.surface === 'terminal' ? 1 : undefined
+    const list = await read($, sessionsAtom)
+    const shown = await read($, shownAtom)
+    const cwd = await $.session.cwd()
+    const self = await $.session.id()
+    const now = list.at || (await $.clock.now())
+    const groups = [...list.groups].sort((a, b) => Number(b.cwd === cwd) - Number(a.cwd === cwd))
+    const folder = (p: string) => tilde(p) || p
+    const quote = (p: string) => (/^[\w~@./-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`)
+    const body = groups.length
+      ? groups.map(g => {
+          const here = g.cwd === cwd
+          const items = g.items.slice(0, PER_FOLDER)
+          const more = g.items.length - items.length
+          return (
+            <Box key={`g:${g.cwd}`} flexDirection="column" borderStyle="round" borderColor={here ? 'claude' : undefined} borderDimColor={!here} paddingX={1} width={width} flexShrink={0}>
+              <Box key="head" flexDirection="row" justifyContent="space-between" width={inner}>
+                <Text wrap="truncate-end">
+                  <Text color={here ? 'claude' : 'subtle'}>▣ </Text>
+                  <Text weight="semibold">{folder(g.cwd)}</Text>
+                </Text>
+                <Text size="caption" color={here ? 'claude' : 'subtle'}>
+                  {here ? 'this folder' : plural(g.items.length, 'session')}
+                </Text>
+              </Box>
+              {items.map(it => {
+                const isSelf = it.id === self
+                const label = it.title || `Untitled · ${it.id.slice(0, 8)}`
+                return (
+                  <Box key={`s:${it.id}`} flexDirection="column" width={inner} flexShrink={0}>
+                    <Box key="row" flexDirection="row" width={inner} height={H1} gap={1}>
+                      <Box flexGrow={1} flexShrink={1} height={H1} overflow="hidden">
+                        {isSelf ? (
+                          <Text wrap="truncate-end">
+                            <Text color="claude">● </Text>
+                            <Text weight="semibold">{label}</Text>
+                          </Text>
+                        ) : (
+                          <Button key={`sess:${it.id}`} plain dimColor={!here} onPress={() => undefined}>
+                            {`○ ${label}`}
+                          </Button>
+                        )}
+                      </Box>
+                      <Box flexShrink={0}>
+                        <Text size="caption" color="subtle" tabular>
+                          {isSelf ? 'this chat' : ageText(now - it.at)}
+                        </Text>
+                      </Box>
+                    </Box>
+                    {shown === it.id ? (
+                      <Box key="cmd" flexDirection="column" width={inner} paddingLeft={2}>
+                        <Text size="caption" color="subtle">
+                          From another folder. In a terminal, run:
+                        </Text>
+                        <Text mono wrap="wrap">{`cd ${quote(folder(g.cwd))} && claude --resume ${it.id}`}</Text>
+                      </Box>
+                    ) : null}
+                  </Box>
+                )
+              })}
+              {more > 0 ? (
+                <Text key="more" size="caption" color="subtle">
+                  {`+${more} older`}
+                </Text>
+              ) : null}
+            </Box>
+          )
+        })
+      : [
+          <Text key="none" color="subtle">
+            No sessions found yet.
+          </Text>,
+        ]
+    return (
+      <Box flexDirection="column" width={width} gap={e.surface === 'terminal' ? 0 : 1}>
+        <Box key="top" flexDirection="row" justifyContent="space-between" width={width} paddingX={1}>
+          <Text size="caption" color="subtle">
+            Press a session of this folder to pick it up.
+          </Text>
+          <Button key="sess-refresh" plain dimColor onPress={() => undefined}>
+            ↻
+          </Button>
+        </Box>
+        {body as never}
       </Box>
     )
   })

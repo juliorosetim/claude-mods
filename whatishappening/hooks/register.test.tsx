@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { modelName, serverLabel, tokenTotals, USAGE_SED } from './register'
+import { modelName, serverLabel, sessionGroups, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -13,7 +13,16 @@ const BAND = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 100 
 /** Keys a path the same wherever the mod thinks home is: everything from /.claude/ on. */
 const key = (p: string) => (p.includes('/.claude/') ? `~${p.slice(p.indexOf('/.claude/'))}` : p)
 
-type World = { files?: Record<string, string>; opened?: string[]; history?: unknown[] | (() => Promise<unknown[]>); noLimits?: boolean }
+type World = {
+  files?: Record<string, string>
+  opened?: string[]
+  history?: unknown[] | (() => Promise<unknown[]>)
+  noLimits?: boolean
+  /** stdout for a process.run, by its argv; '' when it gives none. */
+  run?: (argv: string[]) => string
+  /** What $.prompt.fill put in the prompt box. */
+  filled?: string[]
+}
 
 /** Answers every $ call the mod makes, from a fake disk and a fixed session. */
 function world(on: On, w: World = {}) {
@@ -53,7 +62,12 @@ function world(on: On, w: World = {}) {
     files[key(path)] = text
     return { value: undefined } as never
   })
-  on('process.run', async () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  on('process.run', async ($, e) => ({ value: { exitCode: 0, stdout: w.run?.([...(e as { argv: readonly string[] }).argv]) ?? '', stderr: '' } }) as never)
+  on('prompt.fill', async ($, e) => {
+    w.filled?.push((e as { text: string }).text)
+    return { isFilled: true } as never
+  })
+  on('ui.toast', async () => ({ value: undefined }) as never)
   on('ui.invalidate', async () => ({ value: undefined }) as never)
   on('ui.open', async ($, e) => {
     opened.push((e as { id: string }).id)
@@ -95,6 +109,22 @@ test('model ids read as names', () => {
   expect(modelName('claude-opus-4-20250514')).toBe('Opus 4')
   expect(modelName('haiku'), 'an alias').toBe('Haiku')
   expect(modelName('some-other-model'), 'unknown stays as it is').toBe('some-other-model')
+})
+
+const SID = (n: number) => `0000000${n}-0000-4000-8000-000000000000`
+const SESSIONS_OUT = [
+  `1700000300.5\t./-home-dev-project/${SID(1)}.jsonl\t"cwd":"/home/dev/project"\t"aiTitle":"Fix the parser"\t`,
+  `1700000200.0\t./-home-dev-other/${SID(2)}.jsonl\t"cwd":"/home/dev/other"\t\t"content":"set up the build"`,
+  `1700000100.0\t./-home-dev-project/${SID(3)}.jsonl\t"cwd":"/home/dev/project"\t"customTitle":"Release notes"\t`,
+].join('\n')
+
+test('sessions are grouped by folder, the most recent folder first, titled or named by their first prompt', () => {
+  const groups = sessionGroups(SESSIONS_OUT)
+  expect(groups.map(g => g.cwd)).toEqual(['/home/dev/project', '/home/dev/other'])
+  expect(groups[0]!.items.map(it => it.title), 'newest first').toEqual(['Fix the parser', 'Release notes'])
+  expect(groups[1]!.items[0]!.title, 'no title: its first prompt').toBe('set up the build')
+  expect(groups[0]!.items[0]!.at).toBe(1_700_000_300_500)
+  expect(sessionGroups('garbage\n\n'), 'a line that is no session is skipped').toEqual([])
 })
 
 test('server names read as words, a random id as a short tag', () => {
@@ -426,6 +456,26 @@ for (const surface of SURFACES) {
     expect(await ui.find({ text: /as of \d\d:\d\d/ }), 'marked with when it was taken').toBeDefined()
     expect(await ui.find({ text: /^8%$/ }), 'a 7d reading whose window reset since is not shown').toBeUndefined()
     expect(await ui.find({ text: /reset at/ }), 'it says the window reset').toBeDefined()
+  })
+
+  test(`/sessions lists sessions by folder; a press puts /resume in the prompt or shows the command for another folder (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const opened: string[] = []
+    const filled: string[] = []
+    const clock = world(on, { opened, filled, run: argv => (argv[0] === 'sh' && argv[2]?.includes('aiTitle') ? SESSIONS_OUT : '') })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    const ran = (await $.command.run({ command: 'sessions', args: '' } as never)) as { text?: string }
+    expect(ran.text, 'the command answers').toContain('Sessions pane')
+    expect(opened, 'the pane opens').toContain('whatishappening-sessions')
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening-sessions', props: PANE })
+    const heads = (await ui.findAll({ type: 'Text', text: /^~?\/home\/dev\/(project|other)$|^\/home\/dev\/(project|other)$/ })).map(t => String(t.text))
+    expect(heads, 'this folder first').toEqual(['/home/dev/project', '/home/dev/other'])
+    expect(await ui.find({ text: /^this folder$/ }), 'marked').toBeDefined()
+    await ui.press({ key: `sess:${SID(1)}` })
+    expect(filled, 'a session of this folder: /resume in the prompt box').toEqual([`/resume ${SID(1)}`])
+    await ui.press({ key: `sess:${SID(2)}` })
+    expect(await ui.find({ text: new RegExp(`cd /home/dev/other && claude --resume ${SID(2)}`) }), "another folder's: the command to run").toBeDefined()
+    expect(filled, 'nothing typed for it').toHaveLength(1)
   })
 
   test(`a finished plan stays at 100% for 20 s, then leaves the band (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
