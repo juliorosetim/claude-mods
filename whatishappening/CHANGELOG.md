@@ -4,6 +4,10 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.4.1 - 2026-11-05
+
+- Timeline: "live" shows once, in the section's header, and each prompt's recap sits on its own line under it, so a long prompt no longer pushes it onto a line of its own.
+
 ## 0.4.0 - 2026-11-05
 
 - **Timeline section:** what happened, prompt by prompt. The latest prompt is told event by event, and the earlier ones in one line each (`1m 30s · 12 calls · 2 edits · 1 error`).

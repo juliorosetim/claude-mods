@@ -1562,36 +1562,24 @@ export const register: Register = on => {
     }
     const groups = latest ? groupStory(latest.events).slice(-12) : []
     const timelineBody = [
-      ...earlier.map(tu =>
-        line(
-          `tu:${tu.id}`,
-          <Text wrap="truncate-end" color="subtle">
+      ...earlier.map(tu => (
+        <Box key={`tu:${tu.id}`} flexDirection="column" width={inner} flexShrink={0}>
+          <Text key="prompt" wrap="truncate-end" color="subtle">
             <Text tabular>{`${hhmm(tu.startedAt)}  `}</Text>
             {tu.prompt || 'before the reload'}
-          </Text>,
-          <Text size="caption" color="subtle" tabular>
-            {recap(tu)}
-          </Text>,
-        ),
-      ),
+          </Text>
+          {note('recap', `       ${recap(tu)}`)}
+        </Box>
+      )),
       latest ? (
         <Box key="latest" flexDirection="column" width={inner} marginTop={earlier.length ? 1 : 0}>
-          {line(
-            'latest-head',
-            <Text wrap="truncate-end">
-              <Text color="ide" tabular>{`${hhmm(latest.startedAt)}  `}</Text>
-              <Text weight="semibold">{latest.prompt || 'Before the reload'}</Text>
-            </Text>,
-            latest.endedAt ? (
-              <Text size="caption" color="subtle" tabular>
-                {recap(latest)}
-              </Text>
-            ) : (
-              <Text size="caption" color="claude">
-                live
-              </Text>
-            ),
-          )}
+          {/* The prompt alone on its line: a long one pushed a right-hand note onto a line of its own off the terminal.
+              "live" already sits in the section's header. */}
+          <Text key="latest-head" wrap="truncate-end">
+            <Text color="ide" tabular>{`${hhmm(latest.startedAt)}  `}</Text>
+            <Text weight="semibold">{latest.prompt || 'Before the reload'}</Text>
+          </Text>
+          {latest.endedAt ? note('latest-recap', recap(latest)) : null}
           {groups.length
             ? groups.map((g, i) => {
                 const [glyph, tint] = MARKS[g.kind]
