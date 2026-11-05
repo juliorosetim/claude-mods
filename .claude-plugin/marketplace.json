@@ -1,0 +1,12 @@
+{
+  "name": "julio-mods",
+  "description": "Claude Code mods by Julio Rosetim",
+  "owner": { "name": "Julio Rosetim" },
+  "plugins": [
+    {
+      "name": "whatishappening",
+      "source": "./whatishappening",
+      "description": "A side pane with usage limits, session tokens, the task plan, the agents at work, connectors, files and skills, plus a progress band above the prompt"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Bumps a mod's patch version (0.1.0 -> 0.1.1) when a commit changes its code, and turns the CHANGELOG's
+# "Unreleased" notes into that version. A version you changed yourself in the commit (for a minor or major
+# release) is kept. Turn on once per clone: git config core.hooksPath .githooks. Skip once: git commit --no-verify
+# shortcut: GNU sed only (Linux), and an amend bumps again; port the sed calls and detect amends when that matters.
+set -euo pipefail
+
+today=$(date +%F)
+version_of() { sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1; }
+
+for manifest in */.claude-plugin/plugin.json; do
+  [ -f "$manifest" ] || continue
+  mod=${manifest%%/*}
+  # Docs, the license, the changelog and the manifest itself need no new version: only the rest counts.
+  code=$(git diff --cached --name-only -- "$mod" | grep -vE "^$mod/(README\.md|CHANGELOG\.md|LICENSE|docs/.*|\.claude-plugin/plugin\.json)$" || true)
+  [ -n "$code" ] || continue
+
+  staged=$(git show ":$manifest" | version_of)
+  before=$(git show "HEAD:$manifest" 2>/dev/null | version_of || true)
+  new=$staged
+  if [ -n "$before" ] && [ "$staged" = "$before" ]; then
+    IFS=. read -r major minor patch <<<"$staged"
+    new="$major.$minor.$((patch + 1))"
+    sed -i "s/\"version\":[[:space:]]*\"$staged\"/\"version\": \"$new\"/" "$manifest"
+    git add "$manifest"
+  fi
+
+  log="$mod/CHANGELOG.md"
+  if [ -f "$log" ] && grep -q '^## Unreleased$' "$log" && ! grep -q "^## $new " "$log"; then
+    sed -i "s/^## Unreleased\$/## Unreleased\n\n## $new - $today/" "$log"
+    git add "$log"
+  fi
+  echo "pre-commit: $mod ${before:-new} -> $new"
+done
