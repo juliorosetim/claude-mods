@@ -4,6 +4,13 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-06
+
+- Timeline: the latest prompt reads as a clean log. It shows what Claude wrote to you between its calls, the reports of background commands (`Background command "Wait for the pipeline" completed (exit code 0)`), the steps done, the agents and the failures. Each run of calls between two of these is one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card.
+- Timeline: a prompt you type while Claude answers shows in the log, `❯ also check the screen`.
+- Claude Code's own notices to Claude (a skipped hook) are no longer told as background tasks, and a report delivered twice shows once.
+- A background report that starts an answer of its own shows its summary as that prompt, not `A background task finished`.
+
 ## 0.6.0 - 2026-11-06
 
 - The progress band above the prompt hides while the pane is in sight, as the To-do header shows the same bar; it comes back when the pane closes.

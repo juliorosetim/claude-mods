@@ -75,23 +75,25 @@ Every section folds with its header.
 ![The pane in VS Code](../docs/vscode.png)
 
 ### Timeline
-What happened, prompt by prompt, at the bottom of the pane:
+What happened, prompt by prompt, at the bottom of the pane, as a clean log rather than every call:
 
 ```
 09:41  look at the parser
        1m 30s · 2 calls
 14:02  now fix it
-14:02:11 › Claude     Read 3 files: a.ts, c.ts +1
-14:02:15 ✎ Claude     Edited a.ts
-14:02:18 ◆ Claude     Check the tests
-14:02:20 › Explore    Read parser.test.ts
-14:02:31 $ Claude     Ran npm test
-14:02:40 ✓ Claude     Step done: Fix the parser
+            Called GitLab 2 times · ran 1 command
+14:02:31 ●  The docker deploy is stuck on "Downloading artifacts"
+            for 9 minutes, so I cancel it and run it again.
+14:03:10 ●  Background command "Wait for the pipeline" completed
+            (exit code 0)
+14:03:12 ◆  Check the tests
+14:03:40 ✓  Step done: Fix the parser
 ```
 
+- **The latest prompt:** what Claude wrote to you between its calls, the prompts you typed while it answered (❯), the reports of background commands, the steps done, the agents it started and finished, and the failures, each with its time to the second.
+- **The calls in between:** one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card in Agents.
 - **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
-- **The latest prompt:** event by event. Events in a row of one kind become one line, so five reads are `Read 5 files`, not five lines.
-- **Marks:** ✎ edit, $ command, ⌕ search, › read, ◍ web, ⇄ connector, ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked. Each event has its time to the second and who did it: Claude, or the subagent's type.
+- **Marks:** ● what Claude said (green: a background report), ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked.
 
 ### Sessions
 `/sessions` opens a second pane with your recent sessions, grouped by the folder each one ran in, this folder first. Each row has the session's title, or its first prompt, and how long ago it ran. The chat you are in is marked.

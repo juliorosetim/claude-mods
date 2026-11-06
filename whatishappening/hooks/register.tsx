@@ -49,6 +49,8 @@ const STALE_AFTER = 8
 const NUDGE_NEW = `Reminder from What is happening: this job has no to-do list. Send its steps to ${OWN_PLAN_TOOL} so the person can follow along.`
 const NUDGE_CONT = `Reminder from What is happening: the to-do list is from an earlier prompt. For a new job send its steps to ${OWN_PLAN_TOOL}; if the job goes on, send the list as it stands now.`
 const NUDGE_STALE = `Reminder from What is happening: the to-do list has not moved for a while. If a step is done, send the whole list to ${OWN_PLAN_TOOL} again.`
+// The last chat message the clean log has told; null until the first look after a load.
+let seenKey: string | null = null
 let turnCalls = 0
 let turnPlanned = false
 let nudged = false
@@ -623,6 +625,7 @@ async function recount($: EngineInterface) {
 
   const main = await $.session.messages()
   const all: SessionMessage[] = [...main]
+  if (seenKey === null) await catchUp($)
   for (const m of main) {
     for (const u of m.toolUses) {
       if (!u.agentId) continue
@@ -819,45 +822,109 @@ async function tell($: EngineInterface, ev: StoryEvent) {
   })
 }
 
-// Kinds whose runs of events read as one line: five reads in a row are "Read 5 files".
-const GROUPED = new Set<StoryEvent['kind']>(['read', 'edit', 'search', 'run', 'web'])
+// Calls the clean log folds into one dim line between two things Claude said.
+const TOOLISH = new Set<StoryEvent['kind']>(['read', 'edit', 'search', 'run', 'web', 'connector', 'other'])
 
-/** Events in a row of one kind, by the same agent, joined into one line each. */
-export function groupStory(events: StoryEvent[]): { kind: StoryEvent['kind']; at: number; who?: string; items: string[] }[] {
-  const out: { kind: StoryEvent['kind']; at: number; who?: string; items: string[] }[] = []
+/** A run of calls in words, by kind, first seen first: "Ran 4 commands · called GitLab 2 times · read a.ts". */
+export function toolsLine(events: readonly StoryEvent[]): string {
+  const count = new Map<string, number>()
   for (const ev of events) {
-    const last = out[out.length - 1]
-    if (last && GROUPED.has(ev.kind) && last.kind === ev.kind && last.who === ev.who) last.items.push(ev.text)
-    else out.push({ kind: ev.kind, at: ev.at, ...(ev.who ? { who: ev.who } : {}), items: [ev.text] })
+    const key = ev.kind === 'connector' ? `connector:${ev.text.split(':')[0]}` : ev.kind
+    count.set(key, (count.get(key) ?? 0) + 1)
   }
+  const words = [...count].map(([key, n]) => {
+    if (key.startsWith('connector:')) return `called ${key.slice(10)}${n > 1 ? ` ${n} times` : ''}`
+    const [verb, noun] = ({ read: ['read', 'file'], edit: ['edited', 'file'], run: ['ran', 'command'], search: ['searched', 'time'], web: ['looked up', 'page'] } as Record<string, [string, string]>)[key] ?? ['used', 'tool']
+    return `${verb} ${plural(n, noun)}`
+  })
+  const line = words.join(' · ')
+  return line.charAt(0).toUpperCase() + line.slice(1)
+}
+
+export type LogEntry = { kind: StoryEvent['kind'] | 'tools'; at: number; text: string }
+
+/** The latest prompt as a log a person reads: Claude's words, background reports, steps, agents and failures,
+ *  each run of calls between them as one line of counts. A subagent's own calls show on its card, not here. */
+export function cleanLog(events: readonly StoryEvent[]): LogEntry[] {
+  const out: LogEntry[] = []
+  let run: StoryEvent[] = []
+  const flush = () => {
+    if (run.length) out.push({ kind: 'tools', at: run[0]!.at, text: toolsLine(run) })
+    run = []
+  }
+  for (const ev of events) {
+    if (TOOLISH.has(ev.kind)) {
+      if (!ev.who) run.push(ev)
+      continue
+    }
+    if (ev.who && (ev.kind === 'error' || ev.kind === 'deny')) continue
+    flush()
+    out.push({ kind: ev.kind, at: ev.at, text: storyLine(ev.kind, ev.text) })
+  }
+  flush()
   return out
 }
 
-/** A grouped line in words: "Read 3 files: a.ts, b.ts +1". */
-export function storyLine(g: { kind: StoryEvent['kind']; items: string[] }): string {
-  const n = g.items.length
-  const unique = [...new Set(g.items.filter(Boolean))]
-  const list = unique.length > 2 ? `${unique.slice(0, 2).join(', ')} +${unique.length - 2}` : unique.join(', ')
-  switch (g.kind) {
-    case 'read':
-      return n > 1 ? `Read ${n} files: ${list}` : `Read ${list}`
-    case 'edit':
-      return n > 1 ? `Edited ${n} files: ${list}` : `Edited ${list}`
-    case 'search':
-      return n > 1 ? `Searched ${n} times: ${list}` : `Searched ${list}`
-    case 'run':
-      return n > 1 ? `Ran ${n} commands, last: ${g.items[n - 1]}` : `Ran ${list}`
-    case 'web':
-      return n > 1 ? `Looked up ${n} pages: ${list}` : `Looked up ${list}`
-    case 'step':
-      return `Step done: ${list}`
-    case 'error':
-      return `Failed: ${list}`
-    case 'deny':
-      return `Blocked: ${list}`
-    default:
-      return list
+const NO_SUMMARY = 'A background task finished'
+
+/** A background task's report in words, from its `<task-notification>`; null for any other text. */
+export function noticeOf(text: string): string | null {
+  if (!text.includes('<task-notification')) return null
+  const tag = (name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text)?.[1]?.trim()
+  return tag('summary') || NO_SUMMARY
+}
+
+/** A message of the chat as a clean-log event: Claude's words, a prompt the person typed, a background command's report. */
+export function logEventOf(role: string, words: string): { kind: 'say' | 'prompt' | 'notice'; text: string } | null {
+  if (role === 'assistant') {
+    const said = plainWords(words)
+    return said ? { kind: 'say', text: short(said, 600) } : null
   }
+  // Only a report with a summary: the engine's own notices to Claude come as task notifications too.
+  const notice = noticeOf(words)
+  if (notice) return notice === NO_SUMMARY ? null : { kind: 'notice', text: notice }
+  const typed = words.trim()
+  return role === 'user' && typed && !typed.startsWith('<') ? { kind: 'prompt', text: short(typed.replace(/\s+/g, ' '), 200) } : null
+}
+
+/** The chat's messages since the last look, told in the clean log. Read from the history rather than hooked as they are
+ *  kept: under a Team or Enterprise login Claude Code's own guard skips a user's mod on that event. */
+async function catchUp($: EngineInterface) {
+  // shortcut: reads the whole history (up to 4096 messages) per main-chat call; fine at chat pace, a cursor if the engine offers one.
+  const all = await $.session.messages()
+  const keyOf = (m: SessionMessage) => `${m.role}|${m.text ?? ''}|${m.toolUses.map(u => u.tool_use_id).join(',')}`
+  const from = seenKey ? all.map(keyOf).lastIndexOf(seenKey) : -1
+  const past = seenKey === null || (seenKey !== '' && from < 0)
+  seenKey = all.length ? keyOf(all[all.length - 1]!) : ''
+  // The first look after a load, or a history that lost the last one seen: what is there is the past, not news.
+  if (past) return
+  const latest = (await read($, storyAtom)).at(-1)
+  if (!latest || latest.endedAt) return
+  const header = latest.prompt.replace(/\s+/g, ' ')
+  let last = latest.events.at(-1)
+  for (const m of all.slice(from + 1)) {
+    const ev = typeof m.text === 'string' ? logEventOf(m.role, m.text) : null
+    if (!ev || (last?.kind === ev.kind && last.text === ev.text)) continue
+    // The prompt that opened the answer is its header already.
+    if ((ev.kind === 'prompt' && header === short(ev.text, 80)) || (ev.kind === 'notice' && noticeOf(header) === short(ev.text, 80))) continue
+    last = { at: await $.clock.now(), ...ev }
+    await tell($, last)
+  }
+}
+
+/** Claude's markdown as plain words on one line: no stars, ticks or heading marks. */
+export function plainWords(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^#+\s*/gm, '')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** A step, a failure or a block in words: "Step done: Ship it". */
+export function storyLine(kind: StoryEvent['kind'], what: string): string {
+  return kind === 'step' ? `Step done: ${what}` : kind === 'error' ? `Failed: ${what}` : kind === 'deny' ? `Blocked: ${what}` : what
 }
 
 /** A prompt as the timeline names it: what an agent or the engine sent reads as words, not as its raw tags. */
@@ -868,7 +935,7 @@ export function promptLabel(prompt: string, agents: readonly AgentRow[]): string
     const a = agents.find(r => r.id === from)
     return a ? `Report from ${a.type}${a.description ? `: ${a.description}` : ''}` : 'Report from an agent'
   }
-  if (/^<task-notification/.test(t)) return 'A background task finished'
+  if (/^<task-notification/.test(t)) return noticeOf(t) ?? 'A background task finished'
   if (!t.startsWith('<')) return t
   const words = t.replace(/<[^>]*>?/g, ' ').replace(/\s+/g, ' ').trim()
   return words ? `Message: ${words}` : 'A message from Claude Code'
@@ -1084,7 +1151,9 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
       const at = await $.clock.now()
-      const prompt = short(e.text, 80)
+      // A background report keeps its summary, which sits past the first 80 characters.
+      const notice = noticeOf(e.text)
+      const prompt = notice ? `<task-notification><summary>${short(notice, 80)}</summary>` : short(e.text, 80)
       await update($, storyAtom, turns => [...turns, { id: e.turnId, prompt, startedAt: at, events: [] }].slice(-STORY_TURNS))
     }
     return next(e)
@@ -1131,6 +1200,7 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!e.agentId) {
       void refreshUsage($, true)
+      await catchUp($).catch(err => logError($, 'clean log', err))
       const now = await $.clock.now()
       await update($, storyAtom, turns => (turns.length ? [...turns.slice(0, -1), { ...turns[turns.length - 1]!, endedAt: now }] : turns))
       return ran
@@ -1170,6 +1240,8 @@ export const register: Register = on => {
         logError($, 'agent tool', err),
       )
     }
+    // Claude's words before this call go in the log ahead of it.
+    if (!call.agentId) await catchUp($).catch(err => logError($, 'clean log', err))
     const ran = await next(e)
     try {
       if ((ran as { deny?: unknown }).deny !== undefined) return ran
@@ -1553,6 +1625,9 @@ export const register: Register = on => {
       error: ['✗', 'error'],
       deny: ['⊘', 'error'],
       other: ['•', 'subtle'],
+      say: ['●', ''],
+      notice: ['●', 'success'],
+      prompt: ['❯', 'ide'],
     }
     // ---------- Agents: live ones first, each with its task and its latest action ----------
     const live = agents.filter(a => LIVE.has(a.status)).length
@@ -1801,14 +1876,14 @@ export const register: Register = on => {
     const latest = story[story.length - 1]
     const earlier = story.slice(0, -1).slice(-4)
     const recap = (tu: StoryTurn) => {
-      const calls = tu.events.filter(ev => !['step', 'agent', 'agent-done'].includes(ev.kind)).length
+      const calls = tu.events.filter(ev => TOOLISH.has(ev.kind) || ev.kind === 'error' || ev.kind === 'deny').length
       const edits = tu.events.filter(ev => ev.kind === 'edit').length
       const errors = tu.events.filter(ev => ev.kind === 'error' || ev.kind === 'deny').length
       return [tu.endedAt ? runText(tu.endedAt - tu.startedAt) : '', plural(calls, 'call'), edits ? plural(edits, 'edit') : '', errors ? plural(errors, 'error') : '']
         .filter(Boolean)
         .join(' · ')
     }
-    const groups = latest ? groupStory(latest.events).slice(-12) : []
+    const log = latest ? cleanLog(latest.events).slice(-14) : []
     const timelineBody = [
       ...earlier.map(tu => (
         <Box key={`tu:${tu.id}`} flexDirection="column" width={inner} flexShrink={0}>
@@ -1828,35 +1903,27 @@ export const register: Register = on => {
             <Text weight="semibold">{promptLabel(latest.prompt, agents) || 'Before the reload'}</Text>
           </Text>
           {latest.endedAt ? note('latest-recap', recap(latest)) : null}
-          {groups.length
-            ? groups.map((g, i) => {
-                const [glyph, tint] = MARKS[g.kind]
+          {log.length
+            ? log.map((g, i) => {
+                const [glyph, tint] = g.kind === 'tools' ? [' ', 'subtle'] : MARKS[g.kind]
                 const bad = g.kind === 'error' || g.kind === 'deny'
-                // Columns: when, a mark, who did it (Claude or the agent's type), then what happened.
-                const whoCols = inner >= 40 ? 11 : 0
-                const textCols = inner - 9 - 2 - whoCols
-                const who = g.who ?? 'Claude'
+                const said = g.kind === 'say' || g.kind === 'notice' || g.kind === 'prompt'
+                // Columns: when, a mark, then what happened. Claude's words wrap, up to four lines; the rest is one line.
+                const textCols = inner - 9 - 2
+                const words = said && g.text.length > textCols * 4 ? `${g.text.slice(0, textCols * 4 - 1)}…` : g.text
                 return (
-                  <Box key={`ev${i}`} flexDirection="row" width={inner} height={H1}>
+                  <Box key={`ev${i}`} flexDirection="row" width={inner} {...(said ? {} : { height: H1 })}>
                     <Box width={9} flexShrink={0}>
                       <Text color="subtle" tabular>
-                        {hhmmss(g.at)}
+                        {g.kind === 'tools' ? '' : hhmmss(g.at)}
                       </Text>
                     </Box>
                     <Box width={2} flexShrink={0}>
-                      <Text color={tint}>{glyph}</Text>
+                      <Text color={tint || undefined}>{glyph}</Text>
                     </Box>
-                    {whoCols ? (
-                      <Box width={whoCols} flexShrink={0} height={H1} overflow="hidden">
-                        <Text weight="semibold" bold color={bad ? 'error' : g.who ? 'permission' : 'claude'} wrap="truncate-end">
-                          {who.length > whoCols - 1 ? `${who.slice(0, whoCols - 2)}…` : who}
-                        </Text>
-                      </Box>
-                    ) : null}
-                    <Box width={textCols} flexShrink={0} height={H1} overflow="hidden">
-                      <Text size="caption" wrap="truncate-end" color={bad ? 'error' : undefined}>
-                        {storyLine(g)}
-                        {g.who && !whoCols ? <Text color="subtle">{`  · ${g.who}`}</Text> : null}
+                    <Box width={textCols} flexShrink={0} {...(said ? {} : { height: H1, overflow: 'hidden' as const })}>
+                      <Text size="caption" wrap={said ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
+                        {words}
                       </Text>
                     </Box>
                   </Box>

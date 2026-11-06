@@ -103,8 +103,9 @@ export type UsageView = {
 export type StoryEvent = {
   /** Epoch milliseconds. */
   at: number
-  kind: 'read' | 'edit' | 'run' | 'search' | 'web' | 'connector' | 'agent' | 'agent-done' | 'step' | 'error' | 'deny' | 'other'
-  /** What it was about, short: a file name, a command, a step. */
+  /** `say`: what Claude wrote to the person between its calls; `prompt`: one typed while it answered; `notice`: a background task's report. */
+  kind: 'read' | 'edit' | 'run' | 'search' | 'web' | 'connector' | 'agent' | 'agent-done' | 'step' | 'error' | 'deny' | 'other' | 'say' | 'notice' | 'prompt'
+  /** What it was about, short: a file name, a command, a step, Claude's words. */
   text: string
   /** The agent type, for an event of a subagent's. */
   who?: string
