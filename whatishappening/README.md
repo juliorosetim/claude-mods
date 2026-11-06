@@ -30,6 +30,17 @@ A long Claude Code session hides a lot: how close you are to the usage limit, wh
 
 ![The progress band above the prompt](../docs/band.png)
 
+### Background
+The commands Claude left running in the background, such as a wait for a pipeline, each by its description with a clock of how long it has run:
+
+```
+▾ Background                                   2 running
+$ Wait for the release pipeline               ◐ 4m 12s
+$ Wait for the staging deploy                 ◐ 1m 03s
+```
+
+A command leaves the list when its report comes or Claude stops it. The NOW line counts them: `Waiting on 2 background commands` while nothing else runs.
+
 ### Agents
 Every subagent the chat starts gets a card of its own, in a color of its own, under **Running** or **Finished**:
 

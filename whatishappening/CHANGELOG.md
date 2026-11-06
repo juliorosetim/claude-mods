@@ -4,6 +4,12 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-06
+
+- **Background section:** the commands Claude left running in the background (`$ Wait for the pipeline   ◐ 4m 12s`), each with its clock, from the moment it starts until its report comes or Claude stops it. The NOW line counts them too: `Waiting on 2 background commands`, or `2 in background` beside the step Claude is on.
+
+- Timeline: a reply of Claude's that makes more than one call no longer hides the replies after it from the log.
+
 ## 0.7.0 - 2026-11-06
 
 - Timeline: the latest prompt reads as a clean log. It shows what Claude wrote to you between its calls, the reports of background commands (`Background command "Wait for the pipeline" completed (exit code 0)`), the steps done, the agents and the failures. Each run of calls between two of these is one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card.

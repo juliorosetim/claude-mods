@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, cleanLog, logEventOf, noticeOf, plainWords, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, cleanLog, endedTaskId, startedTaskId, logEventOf, noticeOf, plainWords, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -24,6 +24,8 @@ type World = {
   run?: (argv: string[]) => string
   /** What $.prompt.fill put in the prompt box. */
   filled?: string[]
+  /** A tool's result, by its name; 'ok' for the rest. */
+  results?: Record<string, string>
 }
 
 /** Answers every $ call the mod makes, from a fake disk and a fixed session. */
@@ -76,7 +78,7 @@ function world(on: On, w: World = {}) {
     opened.push((e as { id: string }).id)
     return { value: { id: (e as { id: string }).id } } as never
   })
-  on('tool.call', async () => ({ result: 'ok' }) as never)
+  on('tool.call', async ($, e) => ({ result: w.results?.[(e as { tool: string }).tool] ?? 'ok' }) as never)
   on('agent.list', async () => ({ value: [] }) as never)
   // A test names the id a spawn answers with `id`; ag1 when it does not.
   on('agent.spawn', async ($, e) => ({ model: 'opus', agentId: (e as { id?: string }).id ?? 'ag1' }) as never)
@@ -194,6 +196,13 @@ test('the clean log: what Claude said, each run of calls as one line of counts, 
   expect(storyOf('Bash', { command: 'npm test' }, { isError: true, result: '' }), 'a failed call').toEqual({ kind: 'error', text: 'Bash npm test' })
   expect(storyOf('Edit', { file_path: '/x/a.ts' }, { deny: 'no' }), 'a blocked call').toEqual({ kind: 'deny', text: 'Edit a.ts' })
   expect(storyOf('TodoWrite', {}, { result: '' }), 'told as steps instead').toBeNull()
+})
+
+test('a background command: its id from the result, its end from the report', () => {
+  expect(startedTaskId('Command running in background with ID: bw783gssg. Output is being written to: /tmp/x')).toBe('bw783gssg')
+  expect(startedTaskId({ stdout: 'ok' }), 'a call that ran in the foreground').toBeNull()
+  expect(endedTaskId('<task-notification>\n<task-id>bw783gssg</task-id>\n<status>completed</status>')).toBe('bw783gssg')
+  expect(endedTaskId('<task-id>x</task-id>'), 'only a report').toBeNull()
 })
 
 test('a prompt an agent or the engine sent reads as words', () => {
@@ -610,6 +619,12 @@ for (const surface of SURFACES) {
       { role: 'user', text: 'also check the screen', toolUses: [] },
     )
     await call({ tool: 'Read', tool_use_id: 'b5', file_path: '/home/dev/project/e.ts' })
+    // One reply that gains a call after it was seen, then a second reply: both are told.
+    msgs.push({ role: 'assistant', text: 'Checking the branch first.', toolUses: [{ tool: 'Bash', tool_use_id: 'c1', input: {} }] })
+    await call({ tool: 'Bash', tool_use_id: 'c1', command: 'git log' })
+    msgs[msgs.length - 1]!.toolUses.push({ tool: 'Bash', tool_use_id: 'c2', input: {} })
+    msgs.push({ role: 'assistant', text: 'It is not there yet, so I open the MR.', toolUses: [{ tool: 'Bash', tool_use_id: 'c3', input: {} }] })
+    await call({ tool: 'Bash', tool_use_id: 'c3', command: 'glab mr create' })
     await $.agent.spawn({ prompt: 'p', description: 'Check the tests', subagentType: 'Explore' } as never)
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
@@ -617,6 +632,8 @@ for (const surface of SURFACES) {
     expect(await ui.find({ text: /^The parser is fixed\.$/ }), "Claude's words, without the markdown").toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^Background command "Wait" completed \(exit code 0\)$/ }), 'the background report, once').toHaveLength(1)
     expect(await ui.find({ text: /^also check the screen$/ }), 'a prompt typed while Claude answered').toBeDefined()
+    expect(await ui.findAll({ type: 'Text', text: /^Checking the branch first\.$/ }), 'the first reply, once').toHaveLength(1)
+    expect(await ui.find({ text: /^It is not there yet, so I open the MR\.$/ }), 'the second reply too').toBeDefined()
     expect(await ui.find({ text: /\d\d:\d\d  look at the parser$/ }), 'the earlier prompt, with its time').toBeDefined()
     expect(await ui.find({ text: /^\s+1m 30s · 2 calls$/ }), 'under it: how long, how many calls').toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^now fix it$/ }), 'the latest prompt, as its header only').toHaveLength(1)
@@ -624,6 +641,27 @@ for (const surface of SURFACES) {
     expect((await ui.findAll({ text: /^live$/ })).length, "still running, said once, in the section's header").toBe(1)
     expect(await ui.find({ text: /^Read 3 files · edited 1 file$/ }), 'the calls, one line of counts').toBeDefined()
     expect(await ui.find({ text: /^Check the tests$/ }), 'the agent it started').toBeDefined()
+  })
+
+  test(`a background command shows until its report comes or it is stopped (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
+    const clock = world(on, { history: async () => msgs, results: { Bash: 'Command running in background with ID: bw1. Output is being written to: /tmp/bw1.output' } })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    const call = $.tool.call as unknown as Call
+    await ($.turn.start as unknown as (i: Record<string, unknown>) => Promise<unknown>)({ text: 'ship it', turnId: 't1' })
+    await call({ tool: 'Bash', tool_use_id: 'w1', command: 'sleep 300', description: 'Wait for the pipeline', run_in_background: true })
+    await clock.settle()
+    let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
+    expect(await ui.find({ type: 'Text', text: /^Background$/ }), 'the section').toBeDefined()
+    expect(await ui.find({ text: /^Wait for the pipeline$/ }), 'the command, by its description').toBeDefined()
+    expect(await ui.find({ text: /Waiting on 1 background command/ }), 'the NOW line').toBeDefined()
+    await ui.unmount()
+    msgs.push({ role: 'user', text: '<task-notification><task-id>bw1</task-id><status>completed</status><summary>Background command "Wait for the pipeline" completed (exit code 0)</summary></task-notification>', toolUses: [] })
+    await call({ tool: 'Read', tool_use_id: 'r1', file_path: '/home/dev/project/a.ts' })
+    await clock.settle()
+    ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
+    expect(await ui.find({ type: 'Text', text: /^Background$/ }), 'gone once it reported').toBeUndefined()
   })
 
   test(`the band hides while the pane is in sight (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

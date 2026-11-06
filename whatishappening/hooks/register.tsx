@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { AgentRow, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, StoryEvent, StoryTurn, Tally, UsageView, Used } from '../types'
+import type { AgentRow, BackgroundTask, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, StoryEvent, StoryTurn, Tally, UsageView, Used } from '../types'
 
 const PLUGIN = 'whatishappening'
 const PANE = 'whatishappening'
 const TITLE = 'What is happening'
-const SECTIONS = ['usage', 'todo', 'files', 'connectors', 'agents', 'skills', 'timeline'] as const
+const SECTIONS = ['usage', 'todo', 'background', 'files', 'connectors', 'agents', 'skills', 'timeline'] as const
 type Kind = 'connectors' | 'files' | 'skills'
 
 const ACCENT = '#d97757'
@@ -25,7 +25,7 @@ const TRAIL = 12
 // Call times kept per agent, for its activity lane.
 const BEATS = 120
 // Each section's own color, a theme key, so light, dark and colorblind themes all read.
-const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning', timeline: 'ide' } as const
+const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', background: 'warning', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning', timeline: 'ide' } as const
 // Narrowest agent card that still reads; below it the cards stack.
 const MIN_CARD = 26
 // The bars of an activity lane, from a quiet moment to the busiest.
@@ -49,8 +49,8 @@ const STALE_AFTER = 8
 const NUDGE_NEW = `Reminder from What is happening: this job has no to-do list. Send its steps to ${OWN_PLAN_TOOL} so the person can follow along.`
 const NUDGE_CONT = `Reminder from What is happening: the to-do list is from an earlier prompt. For a new job send its steps to ${OWN_PLAN_TOOL}; if the job goes on, send the list as it stands now.`
 const NUDGE_STALE = `Reminder from What is happening: the to-do list has not moved for a while. If a step is done, send the whole list to ${OWN_PLAN_TOOL} again.`
-// The last chat message the clean log has told; null until the first look after a load.
-let seenKey: string | null = null
+// Where the clean log's last look at the history ended; null until the first look after a load.
+let seen: { count: number; lastKey: string } | null = null
 let turnCalls = 0
 let turnPlanned = false
 let nudged = false
@@ -95,6 +95,9 @@ const SESSIONS_PANE = 'whatishappening-sessions'
 // The timeline: one entry per prompt, each with what happened during it.
 const storyAtom = atom({ plugin: 'whatishappening', key: 'story' } as const, [] as StoryTurn[])
 const STORY_TURNS = 12
+const backgroundAtom = atom({ plugin: 'whatishappening', key: 'background' } as const, [] as BackgroundTask[])
+// shortcut: a task whose report never came (Claude Code restarted) drops after a day; read the engine's list if it offers one.
+const BACKGROUND_TTL = 24 * 3600_000
 const STORY_EVENTS = 80
 const MAX_SESSIONS = 60
 const PER_FOLDER = 8
@@ -625,7 +628,7 @@ async function recount($: EngineInterface) {
 
   const main = await $.session.messages()
   const all: SessionMessage[] = [...main]
-  if (seenKey === null) await catchUp($)
+  if (!seen) await catchUp($)
   for (const m of main) {
     for (const u of m.toolUses) {
       if (!u.agentId) continue
@@ -867,6 +870,21 @@ export function cleanLog(events: readonly StoryEvent[]): LogEntry[] {
 
 const NO_SUMMARY = 'A background task finished'
 
+/** The id a background command's result names: "Command running in background with ID: bw783gssg." */
+export function startedTaskId(result: unknown): string | null {
+  const out = typeof result === 'string' ? result : JSON.stringify(result ?? '')
+  return /running in background with ID: (\w+)/.exec(out)?.[1] ?? null
+}
+
+/** The task a `<task-notification>` reports the end of. */
+export function endedTaskId(text: string): string | null {
+  return text.includes('<task-notification') ? (/<task-id>\s*(\w+)\s*<\/task-id>/.exec(text)?.[1] ?? null) : null
+}
+
+async function endTask($: EngineInterface, id: string | null) {
+  if (id) await update($, backgroundAtom, list => (list.some(t => t.id === id) ? list.filter(t => t.id !== id) : list))
+}
+
 /** A background task's report in words, from its `<task-notification>`; null for any other text. */
 export function noticeOf(text: string): string | null {
   if (!text.includes('<task-notification')) return null
@@ -893,22 +911,26 @@ async function catchUp($: EngineInterface) {
   // shortcut: reads the whole history (up to 4096 messages) per main-chat call; fine at chat pace, a cursor if the engine offers one.
   const all = await $.session.messages()
   const keyOf = (m: SessionMessage) => `${m.role}|${m.text ?? ''}|${m.toolUses.map(u => u.tool_use_id).join(',')}`
-  const from = seenKey ? all.map(keyOf).lastIndexOf(seenKey) : -1
-  const past = seenKey === null || (seenKey !== '' && from < 0)
-  seenKey = all.length ? keyOf(all[all.length - 1]!) : ''
-  // The first look after a load, or a history that lost the last one seen: what is there is the past, not news.
-  if (past) return
+  const prev = seen
+  seen = { count: all.length, lastKey: all.length ? keyOf(all[all.length - 1]!) : '' }
+  // The first look after a load: what is there is the past, not news.
+  if (!prev) return
+  // From where the last look ended; the last message it saw again when that one grew since (more calls on one reply).
+  // A history at its cap drops old messages as new ones come, so then the last few are read again.
+  let from = all.length >= MESSAGES_CAP ? all.length - 8 : prev.count
+  if (prev.count > 0 && prev.count <= all.length && keyOf(all[prev.count - 1]!) !== prev.lastKey) from = Math.min(from, prev.count - 1)
   const latest = (await read($, storyAtom)).at(-1)
   if (!latest || latest.endedAt) return
   const header = latest.prompt.replace(/\s+/g, ' ')
-  let last = latest.events.at(-1)
-  for (const m of all.slice(from + 1)) {
+  const told = new Set(latest.events.map(ev => `${ev.kind}|${ev.text}`))
+  for (const m of all.slice(Math.max(0, from))) {
+    if (m.role === 'user' && typeof m.text === 'string') await endTask($, endedTaskId(m.text))
     const ev = typeof m.text === 'string' ? logEventOf(m.role, m.text) : null
-    if (!ev || (last?.kind === ev.kind && last.text === ev.text)) continue
+    if (!ev || told.has(`${ev.kind}|${ev.text}`)) continue
     // The prompt that opened the answer is its header already.
     if ((ev.kind === 'prompt' && header === short(ev.text, 80)) || (ev.kind === 'notice' && noticeOf(header) === short(ev.text, 80))) continue
-    last = { at: await $.clock.now(), ...ev }
-    await tell($, last)
+    told.add(`${ev.kind}|${ev.text}`)
+    await tell($, { at: await $.clock.now(), ...ev })
   }
 }
 
@@ -1152,6 +1174,7 @@ export const register: Register = on => {
     if (!e.agentId) {
       const at = await $.clock.now()
       // A background report keeps its summary, which sits past the first 80 characters.
+      await endTask($, endedTaskId(e.text))
       const notice = noticeOf(e.text)
       const prompt = notice ? `<task-notification><summary>${short(notice, 80)}</summary>` : short(e.text, 80)
       await update($, storyAtom, turns => [...turns, { id: e.turnId, prompt, startedAt: at, events: [] }].slice(-STORY_TURNS))
@@ -1266,6 +1289,13 @@ export const register: Register = on => {
         }
         return ran
       }
+      if (call.tool === 'Bash' && call.run_in_background === true) {
+        const id = startedTaskId((ran as { result?: unknown }).result)
+        const at = await $.clock.now()
+        const what = text(call.description) || short(homeless(text(call.command)), 60)
+        if (id) await update($, backgroundAtom, list => [...list.filter(t => t.id !== id && at - t.startedAt < BACKGROUND_TTL), { id, what, startedAt: at }])
+      }
+      if (call.tool === 'TaskStop' || call.tool === 'KillShell') await endTask($, text(call.task_id) || text(call.shell_id))
       if (PLAN_TOOLS.has(call.tool)) notePlanned()
       else {
         const plan = await read($, planAtom)
@@ -1570,6 +1600,24 @@ export const register: Register = on => {
 
     // ---------- Connectors: one row each, with its latest call ----------
     const nowMs = await $.clock.now()
+    // ---------- Background: the commands Claude left running, each with its clock ----------
+    const background = (await read($, backgroundAtom)).filter(t => nowMs - t.startedAt < BACKGROUND_TTL)
+    const backgroundBody = background.map(t =>
+      line(
+        `bg:${t.id}`,
+        <Text wrap="truncate-end">
+          <Text color="warning">$ </Text>
+          <Text weight="medium">{t.what}</Text>
+        </Text>,
+        e.surface === 'terminal' && 'Client' in els ? (
+          <els.Client key={`clock:${t.id}`} module="./clock.tsx" props={{ since: t.startedAt, now: nowMs, endAt: null }} />
+        ) : (
+          <Text key={`clock:${t.id}`} size="caption" color="subtle" tabular>
+            {runText(nowMs - t.startedAt)}
+          </Text>
+        ),
+      ),
+    )
     const conns = byNewest(used.connectors)
     const callLine = (c: CallRow) => `${c.what}${c.arg ? ` · ${c.arg}` : ''}`
     const callRows = (name: string, calls: CallRow[]) =>
@@ -1937,15 +1985,18 @@ export const register: Register = on => {
     // The line on top: what the chat is doing right now, in one glance.
     const running = agents.filter(a => a.status === 'running').length
     const current = plan.steps.find(st => st.status === 'in_progress')
-    const isWorking = Boolean(current) || running > 0
+    const isWorking = Boolean(current) || running > 0 || background.length > 0
+    const waiting = background.length ? `${background.length} in background` : ''
     const headline = current
       ? current.active || current.text
       : plan.steps.length && done === plan.steps.length
         ? `Done: ${plan.title || 'every step'}`
         : running
           ? `${plural(running, 'agent')} at work`
-          : 'Waiting for the next job'
-    const aside = [current && running ? plural(running, 'agent') : '', usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : ''].filter(Boolean).join(' · ')
+          : background.length
+            ? `Waiting on ${plural(background.length, 'background command')}`
+            : 'Waiting for the next job'
+    const aside = [current && running ? plural(running, 'agent') : '', current || running ? waiting : '', usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : ''].filter(Boolean).join(' · ')
     const totalCalls = conns.reduce((n, [, t]) => n + t.count, 0)
     const pctDone = plan.steps.length ? Math.round((done / plan.steps.length) * 100) : 0
     // The To-do header's own bar, between its title and its count: one segment per step.
@@ -2007,6 +2058,7 @@ export const register: Register = on => {
         {block('usage', 'Usage', limits, usageBody)}
         {/* Sections with nothing to show take no room. */}
         {plan.steps.length ? block('todo', 'To-do', `${done}/${plan.steps.length} · ${pctDone}%`, todoBody, done < plan.steps.length, todoBar) : null}
+        {background.length ? block('background', 'Background', `${background.length} running`, backgroundBody) : null}
         {files.length ? block('files', 'Context files', plural(files.length, 'file'), fileBody) : null}
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', agentSummary, agentBody, live > 0) : null}

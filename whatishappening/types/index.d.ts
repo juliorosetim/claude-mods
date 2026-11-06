@@ -111,6 +111,15 @@ export type StoryEvent = {
   who?: string
 }
 
+/** A command Claude left running in the background, until its report comes or it is stopped. */
+export type BackgroundTask = {
+  /** The engine's task id, as its result and its report name it. */
+  id: string
+  /** Its description, or the command. */
+  what: string
+  startedAt: number
+}
+
 /** One prompt of the main chat and what happened while Claude answered it. */
 export type StoryTurn = {
   id: string
@@ -152,6 +161,8 @@ declare module 'claude-code' {
       folded: string[]
       /** The timeline: the latest prompts and what happened during each. */
       story: StoryTurn[]
+      /** The main chat's commands running in the background. */
+      background: BackgroundTask[]
       /** The recent sessions the Sessions pane lists. */
       sessions: SessionList
       /** The session from another folder whose resume command is shown; '' for none. */
