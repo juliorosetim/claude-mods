@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { groupStory, modelName, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { folderLabel, groupStory, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -136,6 +136,21 @@ test('timeline events: a run of one kind is one line, an error or a block says s
   expect(storyOf('Bash', { command: 'npm test' }, { isError: true, result: '' }), 'a failed call').toEqual({ kind: 'error', text: 'Bash npm test' })
   expect(storyOf('Edit', { file_path: '/x/a.ts' }, { deny: 'no' }), 'a blocked call').toEqual({ kind: 'deny', text: 'Edit a.ts' })
   expect(storyOf('TodoWrite', {}, { result: '' }), 'told as steps instead').toBeNull()
+})
+
+test('a prompt an agent or the engine sent reads as words', () => {
+  const agents = [{ id: 'a18e', type: 'claude-code-guide', description: 'Verify plugin update docs' }] as never
+  expect(promptLabel('<agent-message from="a18e"> [Subagent hand-back] The text', agents)).toBe('Report from claude-code-guide: Verify plugin update docs')
+  expect(promptLabel('<agent-message from="zzz"> report', agents), 'an agent no longer listed').toBe('Report from an agent')
+  expect(promptLabel('<task-notification><task-id>x', agents)).toBe('A background task finished')
+  expect(promptLabel('fix the parser', agents), 'a typed prompt stays as it is').toBe('fix the parser')
+})
+
+test('two files of one name show as many folders as tell them apart', () => {
+  const all = ['/home/dev/work/app/hooks/register.tsx', '/home/dev/work/lib/hooks/register.tsx', '/home/dev/project/src/app.ts']
+  expect(folderLabel(all[0]!, all)).toBe('…/app/hooks')
+  expect(folderLabel(all[1]!, all)).toBe('…/lib/hooks')
+  expect(folderLabel(all[2]!, all), 'a name of its own keeps the short folder').toBe('/home/dev/project/src')
 })
 
 test('server names read as words, a random id as a short tag', () => {

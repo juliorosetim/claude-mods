@@ -713,6 +713,33 @@ export function storyLine(g: { kind: StoryEvent['kind']; items: string[] }): str
   }
 }
 
+/** A prompt as the timeline names it: what an agent or the engine sent reads as words, not as its raw tags. */
+export function promptLabel(prompt: string, agents: readonly AgentRow[]): string {
+  const t = prompt.trim()
+  const from = /^<agent-message from="([^"]+)"/.exec(t)?.[1]
+  if (from) {
+    const a = agents.find(r => r.id === from)
+    return a ? `Report from ${a.type}${a.description ? `: ${a.description}` : ''}` : 'Report from an agent'
+  }
+  if (/^<task-notification/.test(t)) return 'A background task finished'
+  if (!t.startsWith('<')) return t
+  const words = t.replace(/<[^>]*>?/g, ' ').replace(/\s+/g, ' ').trim()
+  return words ? `Message: ${words}` : 'A message from Claude Code'
+}
+
+/** A file's folder, short; where another listed file has the same name, as many folders as tell the two apart. */
+export function folderLabel(path: string, all: readonly string[]): string {
+  const dirOf = (p: string) => tilde(p.slice(0, Math.max(1, p.lastIndexOf('/'))))
+  const folder = dirOf(path)
+  const parts = folder.split('/').filter(Boolean)
+  const twins = all.filter(o => o !== path && fileName(o) === fileName(path)).map(o => dirOf(o).split('/').filter(Boolean))
+  const tail = (n: number) => parts.slice(-n).join('/')
+  if (!twins.length) return folder.length > 28 && parts.length > 1 ? `…/${tail(1)}` : folder
+  let n = 1
+  while (n < parts.length && twins.some(tw => tw.slice(-n).join('/') === tail(n))) n += 1
+  return n >= parts.length ? folder : `…/${tail(n)}`
+}
+
 // ---------- other sessions ----------
 
 // One line per session file, newest first: modified time, path, its first cwd, its latest title and its first prompt.
@@ -1273,11 +1300,7 @@ export const register: Register = on => {
 
     // ---------- Context files: the name, then its folder ----------
     const files = byNewest(used.files)
-    const folderOf = (path: string) => {
-      const folder = tilde(path.slice(0, Math.max(1, path.lastIndexOf('/'))))
-      const parts = folder.split('/').filter(Boolean)
-      return folder.length > 28 && parts.length > 1 ? `…/${parts[parts.length - 1]}` : folder
-    }
+    const folderOf = (path: string) => folderLabel(path, files.map(([p]) => p))
     const fileBody = files.length
       ? capped(
           'files',
@@ -1566,7 +1589,7 @@ export const register: Register = on => {
         <Box key={`tu:${tu.id}`} flexDirection="column" width={inner} flexShrink={0}>
           <Text key="prompt" wrap="truncate-end" color="subtle">
             <Text tabular>{`${hhmm(tu.startedAt)}  `}</Text>
-            {tu.prompt || 'before the reload'}
+            {promptLabel(tu.prompt, agents) || 'before the reload'}
           </Text>
           {note('recap', `       ${recap(tu)}`)}
         </Box>
@@ -1577,7 +1600,7 @@ export const register: Register = on => {
               "live" already sits in the section's header. */}
           <Text key="latest-head" wrap="truncate-end">
             <Text color="ide" tabular>{`${hhmm(latest.startedAt)}  `}</Text>
-            <Text weight="semibold">{latest.prompt || 'Before the reload'}</Text>
+            <Text weight="semibold">{promptLabel(latest.prompt, agents) || 'Before the reload'}</Text>
           </Text>
           {latest.endedAt ? note('latest-recap', recap(latest)) : null}
           {groups.length

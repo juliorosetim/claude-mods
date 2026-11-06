@@ -4,6 +4,11 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.4.2 - 2026-11-06
+
+- Timeline: a message an agent or Claude Code sent in place of a prompt reads as words, such as `Report from Explore: Find the auth code`, not as its raw tags.
+- Context files: two files of one name show as many folders as tell them apart (`…/app/hooks`, `…/lib/hooks`), so they no longer look like the same file twice.
+
 ## 0.4.1 - 2026-11-05
 
 - Timeline: "live" shows once, in the section's header, and each prompt's recap sits on its own line under it, so a long prompt no longer pushes it onto a line of its own.
