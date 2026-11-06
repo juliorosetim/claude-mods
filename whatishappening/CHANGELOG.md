@@ -4,6 +4,10 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.11.0 - 2026-11-06
+
+- The Timeline section is gone for now: under a Team or Enterprise login Claude Code does not let a user's mod see each message as it is kept, so the log could not be live. It is kept on the `com-timeline` branch. With it go the reading of the chat history every few seconds; the history is now read only while a background command runs, to see its report.
+
 ## 0.10.0 - 2026-11-06
 
 - Sessions: a chat you named with `/rename` shows that name, not the title Claude Code wrote for it.

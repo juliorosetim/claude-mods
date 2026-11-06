@@ -99,18 +99,6 @@ export type UsageView = {
   at: number
 }
 
-/** One thing that happened, for the timeline. */
-export type StoryEvent = {
-  /** Epoch milliseconds. */
-  at: number
-  /** `say`: what Claude wrote to the person between its calls; `prompt`: one typed while it answered; `notice`: a background task's report. */
-  kind: 'read' | 'edit' | 'run' | 'search' | 'web' | 'connector' | 'agent' | 'agent-done' | 'step' | 'error' | 'deny' | 'other' | 'say' | 'notice' | 'prompt'
-  /** What it was about, short: a file name, a command, a step, Claude's words. */
-  text: string
-  /** The agent type, for an event of a subagent's. */
-  who?: string
-}
-
 /** A command Claude left running in the background, until its report comes or it is stopped. */
 export type BackgroundTask = {
   /** The engine's task id, as its result and its report name it. */
@@ -118,18 +106,6 @@ export type BackgroundTask = {
   /** Its description, or the command. */
   what: string
   startedAt: number
-}
-
-/** One prompt of the main chat and what happened while Claude answered it. */
-export type StoryTurn = {
-  id: string
-  /** The prompt's start, short; '' for the entry opened after a reload. */
-  prompt: string
-  startedAt: number
-  /** When the answer ended; absent while it runs. */
-  endedAt?: number
-  /** Oldest first; capped. */
-  events: StoryEvent[]
 }
 
 /** One earlier Claude Code session. */
@@ -159,10 +135,6 @@ declare module 'claude-code' {
       open: string
       /** Sections the person closed. */
       folded: string[]
-      /** The whole Timeline shown, not only its latest lines that fit. */
-      wholeLog: boolean
-      /** The timeline: the latest prompts and what happened during each. */
-      story: StoryTurn[]
       /** The main chat's commands running in the background. */
       background: BackgroundTask[]
       /** The recent sessions the Sessions pane lists. */

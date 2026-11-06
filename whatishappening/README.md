@@ -58,7 +58,7 @@ Every subagent the chat starts gets a card of its own, in a color of its own, un
 
 - **Top of the card:** the agent type and how long it has run, then its task. In the terminal the clock ticks by itself.
 - **Facts:** the model, how many tool calls it made and the tokens it spent.
-- **Latest steps:** with the Timeline's marks (`$` command, `›` read, `✎` edit), ● for the one it is on.
+- **Latest steps:** each with a mark of its kind (`$` command, `›` read, `✎` edit, `⇄` connector), ● for the one it is on.
 - **Finished agents fold** to one line each in their color: the task, how long it ran, its tokens and when it finished. In the terminal, press one to open its card and its latest steps.
 - **Its own to-do list:** when the agent keeps one (TodoWrite, the Task tools or the plan tool), the card shows that list with a progress bar instead. An agent does not say in advance how many steps it will take, so there is no made-up percentage.
 - **Layout:**
@@ -84,28 +84,6 @@ Agents started by workflows show too.
 Every section folds with its header.
 
 ![The pane in VS Code](../docs/vscode.png)
-
-### Timeline
-What happened, prompt by prompt, at the bottom of the pane, as a clean log rather than every call:
-
-```
-09:41  look at the parser
-       1m 30s · 2 calls
-14:02  now fix it
-            Called GitLab 2 times · ran 1 command
-14:02:31 ●  The docker deploy is stuck on "Downloading artifacts"
-            for 9 minutes, so I cancel it and run it again.
-14:03:10 ●  Background command "Wait for the pipeline" completed
-            (exit code 0)
-14:03:12 ◆  Check the tests
-14:03:40 ✓  Step done: Fix the parser
-```
-
-- **The latest prompt:** what Claude wrote to you between its calls, formatted as in the chat (lists, bold, code, headings), the prompts you typed while it answered (❯), the reports of background commands, the steps done, the agents it started and finished, and the failures, each with its time to the second.
-- **Follows the end:** in the terminal the Timeline takes the rows the other sections leave and shows its latest lines, so the sections above stay in sight. `↑ Show the whole log` shows all of it. Only Claude's latest reply shows in full; the earlier ones show their first line.
-- **The calls in between:** one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card in Agents.
-- **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
-- **Marks:** ● what Claude said (green: a background report), ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked.
 
 ### Sessions
 `/sessions` opens a second pane with your recent sessions, grouped by the folder each one ran in, this folder first. Each row has the session's title, or its first prompt, and how long ago it ran. The chat you are in is marked.

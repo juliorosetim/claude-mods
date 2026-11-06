@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, cleanLog, endedTaskId, startedTaskId, logEventOf, noticeOf, replyText, mdLines, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, endedTaskId, startedTaskId, modelName, serverLabel, sessionGroups, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -168,56 +168,11 @@ test('a meter\'s cells: green before the middle, orange past it, red near the en
   expect(Array.from({ length: 10 }, (_, i) => cellZone(i, 10))).toEqual(['low', 'low', 'low', 'low', 'low', 'mid', 'mid', 'mid', 'high', 'high'])
 })
 
-test('the clean log: what Claude said, each run of calls as one line of counts, a subagent\'s calls left to its card', () => {
-  const ev = (kind: string, text: string, who?: string) => ({ at: 1, kind, text, ...(who ? { who } : {}) }) as never
-  const log = cleanLog([
-    ev('read', 'a.ts'), ev('run', 'npm test'), ev('connector', 'GitLab: get job 1'), ev('run', 'ls'), ev('connector', 'GitLab: get job 2'),
-    ev('read', 'd.ts', 'Explore'), ev('error', 'Bash x', 'Explore'),
-    ev('say', 'The job is stuck, so I cancel it.'),
-    ev('notice', 'Background command "Wait" completed (exit code 0)'),
-    ev('edit', 'a.ts'), ev('step', 'Ship it'), ev('error', 'Bash npm test'),
-  ])
-  expect(log.map(l => `${l.kind}|${l.text}`)).toEqual([
-    'tools|Read 1 file · ran 2 commands · called GitLab 2 times',
-    'say|The job is stuck, so I cancel it.',
-    'notice|Background command "Wait" completed (exit code 0)',
-    'tools|Edited 1 file',
-    'step|Step done: Ship it',
-    'error|Failed: Bash npm test',
-  ])
-  expect(replyText('## Done\n\n\n\nThe deploy is up.  \n```sh\nls\n```')).toBe('## Done\n\nThe deploy is up.')
-  expect(mdLines('## Done\n\n- **Fixed:** the `RC2` [deploy](https://x)\n  2. next')).toEqual([
-    { lead: '', heading: true, parts: [{ text: 'Done', style: 'plain' }] },
-    null,
-    { lead: '• ', heading: false, parts: [{ text: 'Fixed:', style: 'bold' }, { text: ' the ', style: 'plain' }, { text: 'RC2', style: 'code' }, { text: ' ', style: 'plain' }, { text: 'deploy', style: 'link' }] },
-    { lead: '  2. ', heading: false, parts: [{ text: 'next', style: 'plain' }] },
-  ])
-  expect(noticeOf('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command "Wait" completed (exit code 0)</summary>\n</task-notification>')).toBe('Background command "Wait" completed (exit code 0)')
-  expect(noticeOf('fix the parser')).toBeNull()
-  const skipped = '<task-notification>\nwhatishappening: its session.append hook was skipped.\n</task-notification>'
-  expect(logEventOf('user', skipped), "the engine's own notice is no background report").toBeNull()
-  expect(logEventOf('user', 'fix  the\nscreen'), 'a prompt typed while Claude answers').toEqual({ kind: 'prompt', text: 'fix the screen' })
-  expect(logEventOf('user', '<system-reminder>x'), 'a reminder').toBeNull()
-  expect(logEventOf('assistant', ''), 'a reply with calls only').toBeNull()
-  expect(storyOf('Bash', { command: 'npm test' }, { isError: true, result: '' }), 'a failed call').toEqual({ kind: 'error', text: 'Bash npm test' })
-  expect(storyOf('Edit', { file_path: '/x/a.ts' }, { deny: 'no' }), 'a blocked call').toEqual({ kind: 'deny', text: 'Edit a.ts' })
-  expect(storyOf('TodoWrite', {}, { result: '' }), 'told as steps instead').toBeNull()
-})
-
 test('a background command: its id from the result, its end from the report', () => {
   expect(startedTaskId('Command running in background with ID: bw783gssg. Output is being written to: /tmp/x')).toBe('bw783gssg')
   expect(startedTaskId({ stdout: 'ok' }), 'a call that ran in the foreground').toBeNull()
   expect(endedTaskId('<task-notification>\n<task-id>bw783gssg</task-id>\n<status>completed</status>')).toBe('bw783gssg')
   expect(endedTaskId('<task-id>x</task-id>'), 'only a report').toBeNull()
-})
-
-test('a prompt an agent or the engine sent reads as words', () => {
-  const agents = [{ id: 'a18e', type: 'claude-code-guide', description: 'Verify plugin update docs' }] as never
-  expect(promptLabel('<agent-message from="a18e"> [Subagent hand-back] The text', agents)).toBe('Report from claude-code-guide: Verify plugin update docs')
-  expect(promptLabel('<agent-message from="zzz"> report', agents), 'an agent no longer listed').toBe('Report from an agent')
-  expect(promptLabel('<task-notification><task-id>x', agents)).toBe('A background task finished')
-  expect(promptLabel('<task-notification><summary>Background command "Build" failed</summary>', agents), 'its summary when it has one').toBe('Background command "Build" failed')
-  expect(promptLabel('fix the parser', agents), 'a typed prompt stays as it is').toBe('fix the parser')
 })
 
 test('two files of one name show as many folders as tell them apart', () => {
@@ -254,7 +209,7 @@ for (const surface of SURFACES) {
     for (const t of [/GitLab/, /Slack/, /^2 calls · \d\d:\d\d$/, /^1 call( · \d\d:\d\d)?$/, /app\.ts/, /CLAUDE\.md/, /release-notes/, /house-style/, /^at start$/]) {
       expect(await ui.find({ text: t }), `${t} shows`).toBeDefined()
     }
-    expect(await ui.find({ type: 'Text', text: /^scratch\.txt$/ }), 'temp files are not context (the timeline still tells the read)').toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^scratch\.txt$/ }), 'temp files are not context').toBeUndefined()
     expect(await ui.find({ text: /SKILL\.md/ }), 'a SKILL.md is a skill, not a file').toBeUndefined()
   })
 
@@ -336,7 +291,7 @@ for (const surface of SURFACES) {
     expect(await ui.find({ type: 'Text', text: /^1\/3 · 33%$/ }), 'count').toBeDefined()
     expect(await ui.find({ text: /^Building the parser$/ }), 'the step in progress is the headline').toBeDefined()
     for (const m of [/^●$/, /^○$/]) expect((await ui.findAll({ type: 'Text', text: m })).length, `${m} once`).toBe(1)
-    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'the done step, in the To-do and as a timeline event').toBe(2)
+    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length, 'the done step, in the To-do').toBe(1)
     expect((await ui.find({ type: 'Text', text: /^Sketch the schema$/ }))?.props.strikethrough, 'done is struck through').toBe(true)
     expect((await ui.findAll({ type: 'Text', text: /^Building the parser$/ })).some(t => t.props.bold), 'the running step, in its -ing form').toBe(true)
   })
@@ -406,7 +361,7 @@ for (const surface of SURFACES) {
     let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     const row = async (re: RegExp) => (await ui.findAll({ type: 'Text', text: re })).map(t => String(t.text))
     expect(await row(/^Grep login$/), 'the earlier step').toHaveLength(1)
-    expect(await row(/^Read auth\.ts$/), 'the step it is on, on the card; the timeline leaves it there').toHaveLength(1)
+    expect(await row(/^Read auth\.ts$/), 'the step it is on, on the card').toHaveLength(1)
     expect((await ui.findAll({ type: 'Text', text: /^●$/ })).length, 'one live mark for the type, one for the step').toBe(2)
     await ui.unmount()
 
@@ -467,7 +422,7 @@ for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ text: /^1 running · 0 done$/ }), 'still running after two list checks, and the fork is no agent').toBeDefined()
     expect(await ui.find({ text: /secret-notes/ }), 'nor are its reads context files').toBeUndefined()
-    expect(await ui.find({ text: /Ran true/ }), 'nor its commands in the timeline').toBeUndefined()
+    expect(await ui.find({ text: /Ran true/ }), 'nor its commands').toBeUndefined()
   })
 
   test(`after a reload a new agent sorts above older ones (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -612,89 +567,6 @@ for (const surface of SURFACES) {
     expect(await ui.find({ text: /Show fewer/ }), 'and a way back').toBeDefined()
     await ui.press({ key: 'more:/home/dev/project' })
     expect(await ui.find({ text: /\+2 older/ }), 'folded again').toBeDefined()
-  })
-
-  test(`the timeline tells the latest prompt as a clean log and earlier ones in one line (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
-    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
-    const clock = world(on, { history: () => msgs })
-    await $.session.start({ ...START, surface } as never)
-    await clock.settle()
-    const call = $.tool.call as unknown as Call
-    const start = $.turn.start as unknown as (input: Record<string, unknown>) => Promise<unknown>
-    const end = () => $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as never)
-    await start({ text: 'look at the parser', turnId: 't1' })
-    await call({ tool: 'Read', tool_use_id: 'a1', file_path: '/home/dev/project/a.ts' })
-    await call({ tool: 'Read', tool_use_id: 'a2', file_path: '/home/dev/project/b.ts' })
-    await clock.advance(90_000)
-    await end()
-    await start({ text: 'now fix it', turnId: 't2' })
-    await call({ tool: 'Read', tool_use_id: 'b1', file_path: '/home/dev/project/a.ts' })
-    await call({ tool: 'Read', tool_use_id: 'b2', file_path: '/home/dev/project/c.ts' })
-    await call({ tool: 'Read', tool_use_id: 'b3', file_path: '/home/dev/project/d.ts' })
-    await call({ tool: 'Edit', tool_use_id: 'b4', file_path: '/home/dev/project/a.ts' })
-    msgs.push(
-      { role: 'user', text: 'now fix it', toolUses: [] },
-      { role: 'assistant', text: 'The **parser** is fixed.', toolUses: [] },
-      { role: 'user', text: '<task-notification><summary>Background command "Wait" completed (exit code 0)</summary></task-notification>', toolUses: [] },
-      { role: 'user', text: '<task-notification>\nwhatishappening: its session.append hook was skipped.\n</task-notification>', toolUses: [] },
-      { role: 'user', text: 'also check the screen', toolUses: [] },
-    )
-    await call({ tool: 'Read', tool_use_id: 'b5', file_path: '/home/dev/project/e.ts' })
-    // One reply that gains a call after it was seen, then a second reply: both are told.
-    msgs.push({ role: 'assistant', text: 'Checking the branch first.', toolUses: [{ tool: 'Bash', tool_use_id: 'c1', input: {} }] })
-    await call({ tool: 'Bash', tool_use_id: 'c1', command: 'git log' })
-    msgs[msgs.length - 1]!.toolUses.push({ tool: 'Bash', tool_use_id: 'c2', input: {} })
-    msgs.push({ role: 'assistant', text: 'It is not there yet, so I open the MR.', toolUses: [{ tool: 'Bash', tool_use_id: 'c3', input: {} }] })
-    await call({ tool: 'Bash', tool_use_id: 'c3', command: 'glab mr create' })
-    await $.agent.spawn({ prompt: 'p', description: 'Check the tests', subagentType: 'Explore' } as never)
-    await clock.settle()
-    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ type: 'Text', text: /^Timeline$/ }), 'the section').toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^The parser is fixed\.$/ }), 'an earlier reply: its first line, plain').toBeDefined()
-    expect(await ui.findAll({ type: 'Text', text: /^Background command "Wait" completed \(exit code 0\)$/ }), 'the background report, once').toHaveLength(1)
-    expect(await ui.find({ text: /^also check the screen$/ }), 'a prompt typed while Claude answered').toBeDefined()
-    expect(await ui.findAll({ type: 'Text', text: /^Checking the branch first\.$/ }), 'the first reply, once').toHaveLength(1)
-    expect(await ui.find({ text: /^It is not there yet, so I open the MR\.$/ }), 'the second reply too').toBeDefined()
-    expect(await ui.find({ text: /\d\d:\d\d  look at the parser$/ }), 'the earlier prompt, with its time').toBeDefined()
-    expect(await ui.find({ text: /^\s+1m 30s · 2 calls$/ }), 'under it: how long, how many calls').toBeDefined()
-    expect(await ui.findAll({ type: 'Text', text: /^now fix it$/ }), 'the latest prompt, as its header only').toHaveLength(1)
-    expect(await ui.find({ text: /hook was skipped|A background task finished/ }), "Claude Code's own notice is left out").toBeUndefined()
-    expect((await ui.findAll({ text: /^live$/ })).length, "still running, said once, in the section's header").toBe(1)
-    expect(await ui.find({ text: /^Read 3 files · edited 1 file$/ }), 'the calls, one line of counts').toBeDefined()
-    expect(await ui.find({ text: /^Check the tests$/ }), 'the agent it started').toBeDefined()
-  })
-
-  test(`a reply kept while a long call runs reaches the log within seconds (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
-    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
-    const clock = world(on, { history: async () => msgs })
-    await $.session.start({ ...START, surface } as never)
-    await clock.settle()
-    await ($.turn.start as unknown as (i: Record<string, unknown>) => Promise<unknown>)({ text: 'run the tests', turnId: 't1' })
-    await ($.tool.call as unknown as Call)({ tool: 'Read', tool_use_id: 'r1', file_path: '/home/dev/project/a.ts' })
-    msgs.push({ role: 'assistant', text: '13 tests pass. Now the script.', toolUses: [] })
-    await clock.advance(3500)
-    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ type: 'Text', text: /^13 tests pass\. Now the script\.$/ }), 'told with no call after it').toBeDefined()
-  })
-
-  test(`the latest reply in full and formatted; in a terminal the Timeline follows its end under the other sections (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
-    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
-    const clock = world(on, { history: async () => msgs })
-    await $.session.start({ ...START, surface } as never)
-    await clock.settle()
-    await ($.turn.start as unknown as (i: Record<string, unknown>) => Promise<unknown>)({ text: 'ship it', turnId: 't1' })
-    msgs.push({ role: 'assistant', text: 'First look.\nMore lines.', toolUses: [] }, { role: 'assistant', text: 'Done:\n- **Script** is in `DES`', toolUses: [] })
-    await ($.tool.call as unknown as Call)({ tool: 'Read', tool_use_id: 'r1', file_path: '/home/dev/project/a.ts' })
-    await clock.settle()
-    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: { ...(PANE as object), scroll: { offset: 0, bodyRows: 40 } } as never })
-    expect(await ui.find({ type: 'Text', text: /^First look\. …$/ }), 'the earlier reply, by its first line').toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Script$/ }), 'the latest, its bold drawn bold').toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^DES$/ }), 'and its code').toBeDefined()
-    if (surface === 'terminal') {
-      expect(await ui.find({ text: /Show the whole log/ }), 'following its end').toBeDefined()
-      await ui.press({ key: 'tl-all' })
-      expect(await ui.find({ text: /Follow the latest/ }), 'the whole log, and the way back').toBeDefined()
-    }
   })
 
   test(`a background command shows until its report comes or it is stopped (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { AgentRow, BackgroundTask, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, StoryEvent, StoryTurn, Tally, UsageView, Used } from '../types'
+import type { AgentRow, BackgroundTask, CallRow, LimitRow, Plan, PlanStep, SessionList, SessionRow, Tally, UsageView, Used } from '../types'
 
 const PLUGIN = 'whatishappening'
 const PANE = 'whatishappening'
 const TITLE = 'What is happening'
-const SECTIONS = ['usage', 'todo', 'background', 'files', 'connectors', 'agents', 'skills', 'timeline'] as const
+const SECTIONS = ['usage', 'todo', 'background', 'files', 'connectors', 'agents', 'skills'] as const
 type Kind = 'connectors' | 'files' | 'skills'
 
 const ACCENT = '#d97757'
@@ -25,7 +25,7 @@ const TRAIL = 12
 // Call times kept per agent, for its activity lane.
 const BEATS = 120
 // Each section's own color, a theme key, so light, dark and colorblind themes all read.
-const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', background: 'warning', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning', timeline: 'ide' } as const
+const SECTION_COLOR = { usage: 'suggestion', todo: 'claude', background: 'warning', files: 'merged', connectors: 'success', agents: 'permission', skills: 'warning' } as const
 // Narrowest agent card that still reads; below it the cards stack.
 const MIN_CARD = 26
 // The bars of an activity lane, from a quiet moment to the busiest.
@@ -49,10 +49,7 @@ const STALE_AFTER = 8
 const NUDGE_NEW = `Reminder from What is happening: this job has no to-do list. Send its steps to ${OWN_PLAN_TOOL} so the person can follow along.`
 const NUDGE_CONT = `Reminder from What is happening: the to-do list is from an earlier prompt. For a new job send its steps to ${OWN_PLAN_TOOL}; if the job goes on, send the list as it stands now.`
 const NUDGE_STALE = `Reminder from What is happening: the to-do list has not moved for a while. If a step is done, send the whole list to ${OWN_PLAN_TOOL} again.`
-// Where the clean log's last look at the history ended; null until the first look after a load.
-let seen: { count: number; lastKey: string } | null = null
-let catching: Promise<void> | null = null
-let logTimer: unknown = null
+let backgroundTimer: unknown = null
 let turnCalls = 0
 let turnPlanned = false
 let nudged = false
@@ -86,8 +83,6 @@ const NO_PLAN: Plan = { title: '', steps: [], updatedAt: 0 }
 const planAtom = atom({ plugin: 'whatishappening', key: 'plan' } as const, NO_PLAN)
 const openAtom = atom({ plugin: 'whatishappening', key: 'open' } as const, '')
 const foldedAtom = atom({ plugin: 'whatishappening', key: 'folded' } as const, [] as string[])
-// The whole Timeline, not only the latest lines that fit under the other sections.
-const wholeLogAtom = atom({ plugin: 'whatishappening', key: 'wholeLog' } as const, false)
 const agentsAtom = atom({ plugin: 'whatishappening', key: 'agents' } as const, [] as AgentRow[])
 const NO_USAGE: UsageView = { fiveHour: null, sevenDay: null, contextTokens: 0, contextWindow: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, at: 0 }
 const usageAtom = atom({ plugin: 'whatishappening', key: 'usage' } as const, NO_USAGE)
@@ -98,13 +93,9 @@ const shownAtom = atom({ plugin: 'whatishappening', key: 'shown' } as const, '')
 // The folders whose every session the Sessions pane lists, not only the latest few.
 const expandedAtom = atom({ plugin: 'whatishappening', key: 'expanded' } as const, [] as string[])
 const SESSIONS_PANE = 'whatishappening-sessions'
-// The timeline: one entry per prompt, each with what happened during it.
-const storyAtom = atom({ plugin: 'whatishappening', key: 'story' } as const, [] as StoryTurn[])
-const STORY_TURNS = 12
 const backgroundAtom = atom({ plugin: 'whatishappening', key: 'background' } as const, [] as BackgroundTask[])
 // shortcut: a task whose report never came (Claude Code restarted) drops after a day; read the engine's list if it offers one.
 const BACKGROUND_TTL = 24 * 3600_000
-const STORY_EVENTS = 80
 // shortcut: ~2 s to read 150 transcripts on open; read one folder's older sessions on demand if that grows slow.
 const MAX_SESSIONS = 150
 const PER_FOLDER = 8
@@ -132,7 +123,6 @@ const BAR_H = 18
 
 const pad = (n: number) => String(n).padStart(2, '0')
 const hhmm = (ms: number) => (ms ? `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}` : '')
-const hhmmss = (ms: number) => (ms ? `${hhmm(ms)}:${pad(new Date(ms).getSeconds())}` : '')
 const plural = (n: number, word: string) => (n === 1 ? `1 ${word}` : `${n} ${word}s`)
 const kTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n))
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
@@ -218,8 +208,10 @@ export function agentColors(ids: readonly string[]): Map<string, string> {
   return out
 }
 
-/** The Timeline's mark for one step of an agent, read from its words ("Read auth.ts", "Bash npm test"). */
-export function actionMark(action: string): StoryEvent['kind'] {
+export type ActionKind = 'read' | 'edit' | 'run' | 'search' | 'web' | 'connector' | 'other'
+
+/** The mark for one step of an agent, read from its words ("Read auth.ts", "Bash npm test"). */
+export function actionMark(action: string): ActionKind {
   const tool = action.split(' ')[0] ?? ''
   if (/:$/.test(tool)) return 'connector'
   if (tool === 'Read') return 'read'
@@ -432,14 +424,11 @@ async function watchPlan($: EngineInterface, call: Record<string, unknown> & { t
   if (!PLAN_TOOLS.has(call.tool) || call.agentId) return false
   const now = await $.clock.now()
   let changed = false
-  let finished: string[] = []
   await update($, planAtom, cur => {
     const next = planAfter(cur, call.tool, call, result, Math.max(now, cur.updatedAt + 1))
     changed = next !== null
-    finished = next ? stepsFinished(cur, next) : []
     return next ?? cur
   })
-  for (const step of finished) await tell($, { at: now, kind: 'step', text: step })
   return changed
 }
 
@@ -635,7 +624,6 @@ async function recount($: EngineInterface) {
 
   const main = await $.session.messages()
   const all: SessionMessage[] = [...main]
-  if (!seen) await catchUpOnce($)
   for (const m of main) {
     for (const u of m.toolUses) {
       if (!u.agentId) continue
@@ -785,97 +773,7 @@ function stepsText(Text: (p: Record<string, unknown>) => unknown, steps: readonl
 }
 
 
-// ---------- the timeline ----------
-
-const READS = new Set(['Read', 'NotebookRead'])
-const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const SEARCHES = new Set(['Grep', 'Glob'])
-const WEB = new Set(['WebFetch', 'WebSearch'])
-// Calls the timeline tells another way (a spawn, a plan step) or not at all.
-const UNTOLD = new Set([...PLAN_TOOLS, 'Agent', 'Task', 'SubagentHandback', 'ToolSearch'])
-
-/** One call as a timeline event, or null for a call told another way. */
-export function storyOf(tool: string, input: Record<string, unknown>, ran: unknown): Omit<StoryEvent, 'at' | 'who'> | null {
-  if (UNTOLD.has(tool)) return null
-  const r = ran as { deny?: unknown; isError?: unknown }
-  const path = fileName(text(input.file_path) || text(input.notebook_path))
-  const told: Omit<StoryEvent, 'at' | 'who'> = READS.has(tool)
-    ? { kind: 'read', text: path }
-    : EDITS.has(tool)
-      ? { kind: 'edit', text: path }
-      : tool === 'Bash'
-        ? { kind: 'run', text: short(homeless(text(input.command)), 60) }
-        : SEARCHES.has(tool)
-          ? { kind: 'search', text: short(text(input.pattern), 40) }
-          : WEB.has(tool)
-            ? { kind: 'web', text: short(text(input.url) || text(input.query), 50) }
-            : tool.startsWith('mcp__')
-              ? { kind: 'connector', text: actionOf(tool, input) }
-              : { kind: 'other', text: actionOf(tool, input) }
-  if (r?.deny !== undefined) return { kind: 'deny', text: `${tool} ${told.text}`.trim() }
-  if (r?.isError === true) return { kind: 'error', text: `${tool} ${told.text}`.trim() }
-  return told
-}
-
-/** The steps a plan update marked completed. */
-function stepsFinished(before: Plan, after: Plan): string[] {
-  const was = new Set(before.steps.filter(st => st.status === 'completed').map(st => st.text))
-  return after.steps.filter(st => st.status === 'completed' && !was.has(st.text)).map(st => st.text)
-}
-
-/** Adds an event to the latest entry, opening one when the timeline has none yet (a reload mid-turn). */
-async function tell($: EngineInterface, ev: StoryEvent) {
-  await update($, storyAtom, turns => {
-    const last = turns[turns.length - 1] ?? { id: 'before', prompt: '', startedAt: ev.at, events: [] }
-    const rest = turns.length ? turns.slice(0, -1) : []
-    return [...rest, { ...last, events: [...last.events, ev].slice(-STORY_EVENTS) }]
-  })
-}
-
-// Calls the clean log folds into one dim line between two things Claude said.
-const TOOLISH = new Set<StoryEvent['kind']>(['read', 'edit', 'search', 'run', 'web', 'connector', 'other'])
-
-/** A run of calls in words, by kind, first seen first: "Ran 4 commands · called GitLab 2 times · read a.ts". */
-export function toolsLine(events: readonly StoryEvent[]): string {
-  const count = new Map<string, number>()
-  for (const ev of events) {
-    const key = ev.kind === 'connector' ? `connector:${ev.text.split(':')[0]}` : ev.kind
-    count.set(key, (count.get(key) ?? 0) + 1)
-  }
-  const words = [...count].map(([key, n]) => {
-    if (key.startsWith('connector:')) return `called ${key.slice(10)}${n > 1 ? ` ${n} times` : ''}`
-    const [verb, noun] = ({ read: ['read', 'file'], edit: ['edited', 'file'], run: ['ran', 'command'], search: ['searched', 'time'], web: ['looked up', 'page'] } as Record<string, [string, string]>)[key] ?? ['used', 'tool']
-    return `${verb} ${plural(n, noun)}`
-  })
-  const line = words.join(' · ')
-  return line.charAt(0).toUpperCase() + line.slice(1)
-}
-
-export type LogEntry = { kind: StoryEvent['kind'] | 'tools'; at: number; text: string }
-
-/** The latest prompt as a log a person reads: Claude's words, background reports, steps, agents and failures,
- *  each run of calls between them as one line of counts. A subagent's own calls show on its card, not here. */
-export function cleanLog(events: readonly StoryEvent[]): LogEntry[] {
-  const out: LogEntry[] = []
-  let run: StoryEvent[] = []
-  const flush = () => {
-    if (run.length) out.push({ kind: 'tools', at: run[0]!.at, text: toolsLine(run) })
-    run = []
-  }
-  for (const ev of events) {
-    if (TOOLISH.has(ev.kind)) {
-      if (!ev.who) run.push(ev)
-      continue
-    }
-    if (ev.who && (ev.kind === 'error' || ev.kind === 'deny')) continue
-    flush()
-    out.push({ kind: ev.kind, at: ev.at, text: storyLine(ev.kind, ev.text) })
-  }
-  flush()
-  return out
-}
-
-const NO_SUMMARY = 'A background task finished'
+// ---------- background commands ----------
 
 /** The id a background command's result names: "Command running in background with ID: bw783gssg." */
 export function startedTaskId(result: unknown): string | null {
@@ -892,117 +790,13 @@ async function endTask($: EngineInterface, id: string | null) {
   if (id) await update($, backgroundAtom, list => (list.some(t => t.id === id) ? list.filter(t => t.id !== id) : list))
 }
 
-/** A background task's report in words, from its `<task-notification>`; null for any other text. */
-export function noticeOf(text: string): string | null {
-  if (!text.includes('<task-notification')) return null
-  const tag = (name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text)?.[1]?.trim()
-  return tag('summary') || NO_SUMMARY
-}
-
-/** A message of the chat as a clean-log event: Claude's words, a prompt the person typed, a background command's report. */
-export function logEventOf(role: string, words: string): { kind: 'say' | 'prompt' | 'notice'; text: string } | null {
-  if (role === 'assistant') {
-    const said = replyText(words)
-    return said ? { kind: 'say', text: said } : null
-  }
-  // Only a report with a summary: the engine's own notices to Claude come as task notifications too.
-  const notice = noticeOf(words)
-  if (notice) return notice === NO_SUMMARY ? null : { kind: 'notice', text: notice }
-  const typed = words.trim()
-  return role === 'user' && typed && !typed.startsWith('<') ? { kind: 'prompt', text: short(typed.replace(/\s+/g, ' '), 200) } : null
-}
-
-/** The chat's messages since the last look, told in the clean log. Read from the history rather than hooked as they are
- *  kept: under a Team or Enterprise login Claude Code's own guard skips a user's mod on that event. */
-/** One look at a time: the timer and a call may ask together, and two looks would tell a reply twice. */
-function catchUpOnce($: EngineInterface): Promise<void> {
-  catching ??= catchUp($).finally(() => {
-    catching = null
-  })
-  return catching
-}
-
-async function catchUp($: EngineInterface) {
-  // shortcut: reads the whole history (up to 4096 messages) per main-chat call; fine at chat pace, a cursor if the engine offers one.
-  const all = await $.session.messages()
-  const keyOf = (m: SessionMessage) => `${m.role}|${m.text ?? ''}|${m.toolUses.map(u => u.tool_use_id).join(',')}`
-  const prev = seen
-  seen = { count: all.length, lastKey: all.length ? keyOf(all[all.length - 1]!) : '' }
-  // The first look after a load: what is there is the past, not news.
-  if (!prev) return
-  // From where the last look ended; the last message it saw again when that one grew since (more calls on one reply).
-  // A history at its cap drops old messages as new ones come, so then the last few are read again.
-  let from = all.length >= MESSAGES_CAP ? all.length - 8 : prev.count
-  if (prev.count > 0 && prev.count <= all.length && keyOf(all[prev.count - 1]!) !== prev.lastKey) from = Math.min(from, prev.count - 1)
-  const latest = (await read($, storyAtom)).at(-1)
-  if (!latest || latest.endedAt) return
-  const header = latest.prompt.replace(/\s+/g, ' ')
-  const told = new Set(latest.events.map(ev => `${ev.kind}|${ev.text}`))
-  for (const m of all.slice(Math.max(0, from))) {
-    if (m.role === 'user' && typeof m.text === 'string') await endTask($, endedTaskId(m.text))
-    const ev = typeof m.text === 'string' ? logEventOf(m.role, m.text) : null
-    if (!ev || told.has(`${ev.kind}|${ev.text}`)) continue
-    // The prompt that opened the answer is its header already.
-    if ((ev.kind === 'prompt' && header === short(ev.text, 80)) || (ev.kind === 'notice' && noticeOf(header) === short(ev.text, 80))) continue
-    told.add(`${ev.kind}|${ev.text}`)
-    await tell($, { at: await $.clock.now(), ...ev })
-  }
-}
-
-/** Claude's reply as the log keeps it: its markdown, without code blocks and runs of blank lines, cut at a line
- *  once past 1500 characters. */
-export function replyText(md: string): string {
-  const kept = md
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/[ \t]+$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-  if (kept.length <= 1500) return kept
-  const cut = kept.lastIndexOf('\n', 1500)
-  return `${kept.slice(0, cut > 500 ? cut : 1500).trimEnd()} …`
-}
-
-export type MdPart = { text: string; style: 'plain' | 'bold' | 'code' | 'link' }
-export type MdLine = { lead: string; parts: MdPart[]; heading: boolean } | null
-
-/** A reply's lines as the Timeline draws them: null for a blank line, else its lead (a bullet, a number, an indent)
- *  and its words, with **bold**, `code` and [links](url) told apart. */
-export function mdLines(md: string): MdLine[] {
-  return md.split('\n').map(raw => {
-    if (!raw.trim()) return null
-    const heading = /^#{1,6}\s+/.test(raw)
-    const item = /^(\s*)(?:[-*+]|(\d+)[.)])\s+(.*)$/.exec(raw)
-    const lead = item ? `${' '.repeat(Math.min(item[1]!.length, 6))}${item[2] ? `${item[2]}.` : '•'} ` : ''
-    const body = item ? item[3]! : raw.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
-    const parts: MdPart[] = []
-    for (const bit of body.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/)) {
-      if (!bit) continue
-      if (/^\*\*[^*]+\*\*$/.test(bit)) parts.push({ text: bit.slice(2, -2), style: 'bold' })
-      else if (/^`[^`]+`$/.test(bit)) parts.push({ text: bit.slice(1, -1), style: 'code' })
-      else if (/^\[[^\]]+\]\([^)]+\)$/.test(bit)) parts.push({ text: bit.slice(1, bit.indexOf(']')), style: 'link' })
-      else parts.push({ text: bit, style: 'plain' })
-    }
-    return { lead, parts, heading }
-  })
-}
-
-/** A step, a failure or a block in words: "Step done: Ship it". */
-export function storyLine(kind: StoryEvent['kind'], what: string): string {
-  return kind === 'step' ? `Step done: ${what}` : kind === 'error' ? `Failed: ${what}` : kind === 'deny' ? `Blocked: ${what}` : what
-}
-
-/** A prompt as the timeline names it: what an agent or the engine sent reads as words, not as its raw tags. */
-export function promptLabel(prompt: string, agents: readonly AgentRow[]): string {
-  const t = prompt.trim()
-  const from = /^<agent-message from="([^"]+)"/.exec(t)?.[1]
-  if (from) {
-    const a = agents.find(r => r.id === from)
-    return a ? `Report from ${a.type}${a.description ? `: ${a.description}` : ''}` : 'Report from an agent'
-  }
-  if (/^<task-notification/.test(t)) return noticeOf(t) ?? 'A background task finished'
-  if (!t.startsWith('<')) return t
-  const words = t.replace(/<[^>]*>?/g, ' ').replace(/\s+/g, ' ').trim()
-  return words ? `Message: ${words}` : 'A message from Claude Code'
+/** Ends the background commands whose report reached a running answer. Read from the history: under a Team or
+ *  Enterprise login Claude Code's own guard skips a user's mod on the event that keeps it. Reads nothing while
+ *  no command runs. */
+async function checkBackground($: EngineInterface) {
+  if (!(await read($, backgroundAtom)).length) return
+  // A report is among the latest messages when it lands; the last 40 cover the calls made since.
+  for (const m of (await $.session.messages()).slice(-40)) if (m.role === 'user' && typeof m.text === 'string') await endTask($, endedTaskId(m.text))
 }
 
 /** A file's folder, short; where another listed file has the same name, as many folders as tell the two apart. */
@@ -1154,13 +948,9 @@ export const register: Register = on => {
     if (!syncTimer) syncTimer = $.clock.every(3000, () => void syncAgents($))
     // Every 30 s: limits move, the countdowns tick and the tokens are read again, so a long first turn shows them too.
     if (!usageTimer) usageTimer = $.clock.every(30000, () => void refreshUsage($, true))
-    // A call starts before its reply is kept in the history, so a long call held the reply back from the log until
-    // the next one: look again every few seconds while an answer runs.
-    if (!logTimer)
-      logTimer = $.clock.every(3000, async () => {
-        const latest = (await read($, storyAtom)).at(-1)
-        if (latest && !latest.endedAt) await catchUpOnce($).catch(err => logError($, 'clean log', err))
-      })
+    // A background command's report may land while Claude waits with no call to make: look every few seconds,
+    // only while one runs.
+    if (!backgroundTimer) backgroundTimer = $.clock.every(5000, () => void checkBackground($).catch(err => logError($, 'background', err)))
     void refreshUsage($, true)
     // The skill names first: the recount needs them to tell a typed skill from another slash command.
     void loadStart($)
@@ -1205,31 +995,21 @@ export const register: Register = on => {
     }
     const now = await $.clock.now()
     let saved: Plan | null = null
-    let finished: string[] = []
     await update($, planAtom, cur => {
       saved = planAfter(cur, OWN_PLAN_TOOL, call, undefined, Math.max(now, cur.updatedAt + 1))
-      finished = saved ? stepsFinished(cur, saved) : []
       return saved ?? cur
     })
     const plan = saved as Plan | null
     if (!plan || !plan.steps.length) return { result: 'Nothing saved: each step needs a text and a status.' } as never
-    for (const step of finished) await tell($, { at: now, kind: 'step', text: step })
     notePlanned()
     openOnce($)
     const done = plan.steps.filter(st => st.status === 'completed').length
     return { result: `To-do list updated: ${done}/${plan.steps.length} completed.` } as never
   }).catch(() => ({ result: 'The to-do list could not be saved this time. Go on with your work.' }) as never)
 
-  // A prompt of the main chat opens a new entry in the timeline.
+  // A background command's report that starts an answer of its own ends that command.
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) {
-      const at = await $.clock.now()
-      // A background report keeps its summary, which sits past the first 80 characters.
-      await endTask($, endedTaskId(e.text))
-      const notice = noticeOf(e.text)
-      const prompt = notice ? `<task-notification><summary>${short(notice, 80)}</summary>` : short(e.text, 80)
-      await update($, storyAtom, turns => [...turns, { id: e.turnId, prompt, startedAt: at, events: [] }].slice(-STORY_TURNS))
-    }
+    if (!e.agentId) await endTask($, endedTaskId(e.text))
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1261,7 +1041,6 @@ export const register: Register = on => {
     if (!ran.agentId) return ran
     try {
       await upsertAgent($, ran.agentId, () => ({ type: e.subagentType || 'general-purpose', description: e.description, status: 'running', model: ran.model, known: true }))
-      await tell($, { at: await $.clock.now(), kind: 'agent', text: e.description || 'started', who: e.subagentType })
       openOnce($)
     } catch (err) {
       await logError($, 'agent.spawn', err)
@@ -1274,11 +1053,7 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!e.agentId) {
       void refreshUsage($, true)
-      // A look already under way may predate the final reply: let it end, then look once more.
-      await catching?.catch(() => undefined)
-      await catchUpOnce($).catch(err => logError($, 'clean log', err))
-      const now = await $.clock.now()
-      await update($, storyAtom, turns => (turns.length ? [...turns.slice(0, -1), { ...turns[turns.length - 1]!, endedAt: now }] : turns))
+      await checkBackground($).catch(err => logError($, 'background', err))
       return ran
     }
     if (!(await read($, agentsAtom)).some(r => r.id === e.agentId)) return ran
@@ -1291,10 +1066,6 @@ export const register: Register = on => {
       tokens: (old.tokens ?? 0) + spent,
       ...(u?.model ? { model: u.model } : {}),
     }))
-    const row = (await read($, agentsAtom)).find(r => r.id === e.agentId)
-    if (!row || !isKnown(row)) return ran
-    const took = row?.startedAt ? ` in ${runText(now - row.startedAt)}` : ''
-    await tell($, { at: now, kind: e.isAborted ? 'error' : 'agent-done', text: `${e.isAborted ? 'stopped' : 'finished'}${took}`, who: row?.type })
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -1316,8 +1087,7 @@ export const register: Register = on => {
         logError($, 'agent tool', err),
       )
     }
-    // Claude's words before this call go in the log ahead of it.
-    if (!call.agentId) await catchUpOnce($).catch(err => logError($, 'clean log', err))
+    if (!call.agentId) await checkBackground($).catch(err => logError($, 'background', err))
     const ran = await next(e)
     try {
       if ((ran as { deny?: unknown }).deny !== undefined) return ran
@@ -1325,11 +1095,6 @@ export const register: Register = on => {
       // The engine's own forks read and run things too; they are not the chat's work.
       if (call.agentId && !(row && isKnown(row))) return ran
       await note($, call.tool_use_id, usesOf(call.tool, call))
-      const told = storyOf(call.tool, call, ran)
-      if (told) {
-        const who = row?.type
-        await tell($, { at: await $.clock.now(), ...told, ...(who ? { who } : {}) })
-      }
       if (await watchPlan($, call, (ran as { result?: unknown }).result)) openOnce($)
       if (call.agentId) {
         // Its own TodoWrite or Task list goes on its card (the plan tool answers for itself above).
@@ -1371,8 +1136,6 @@ export const register: Register = on => {
     } else if (el.startsWith('c:') || el.startsWith('ag:')) {
       const name = el.startsWith('c:') ? el.slice(2) : el
       await update($, openAtom, cur => (cur === name ? '' : name))
-    } else if (el === 'tl-all') {
-      await update($, wholeLogAtom, cur => !cur)
     } else if (el === 'sess-refresh') {
       await loadSessions($)
     } else if (el.startsWith('more:')) {
@@ -1456,11 +1219,6 @@ export const register: Register = on => {
     const used = await read($, usedAtom)
     const plan = await read($, planAtom)
     const folded = await read($, foldedAtom)
-    // In the terminal the pane is as tall as its body, and the Timeline takes the rows the other sections leave,
-    // its latest lines at the bottom: the sections above stay in sight with no scrolling.
-    const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows ?? 0
-    const wholeLog = await read($, wholeLogAtom)
-    const follow = !Svg && bodyRows > 0 && !wholeLog && !folded.includes('timeline')
     const openName = await read($, openAtom)
     const usage = await read($, usageAtom)
     const agents = (await read($, agentsAtom)).filter(isKnown).sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || b.seq - a.seq)
@@ -1508,7 +1266,7 @@ export const register: Register = on => {
         </Box>
       )
       return (
-        <Box key={id} flexDirection="column" borderStyle="round" borderColor={tint} borderDimColor={!isActive} paddingX={1} paddingY={Svg ? 1 : 0} width={width} {...(id === 'timeline' && follow && !shut ? { flexShrink: 1, minHeight: 8, overflow: 'hidden' as const } : { flexShrink: 0 })}>
+        <Box key={id} flexDirection="column" borderStyle="round" borderColor={tint} borderDimColor={!isActive} paddingX={1} paddingY={Svg ? 1 : 0} width={width} flexShrink={0}>
           {head}
           {shut ? null : (body as never)}
         </Box>
@@ -1723,22 +1481,14 @@ export const register: Register = on => {
         )
       : nothing
 
-    const MARKS: Record<StoryEvent['kind'], [string, string]> = {
+    const MARKS: Record<ActionKind, [string, string]> = {
       read: ['›', 'subtle'],
       edit: ['✎', 'warning'],
       run: ['$', 'suggestion'],
       search: ['⌕', 'subtle'],
       web: ['◍', 'suggestion'],
       connector: ['⇄', 'success'],
-      agent: ['◆', 'permission'],
-      'agent-done': ['◇', 'permission'],
-      step: ['✓', 'success'],
-      error: ['✗', 'error'],
-      deny: ['⊘', 'error'],
       other: ['•', 'subtle'],
-      say: ['●', ''],
-      notice: ['●', 'success'],
-      prompt: ['❯', 'ide'],
     }
     // ---------- Agents: live ones first, each with its task and its latest action ----------
     const live = agents.filter(a => LIVE.has(a.status)).length
@@ -1982,126 +1732,6 @@ export const register: Register = on => {
         )
       : nothing
 
-    // ---------- Timeline: earlier prompts as one line each, the latest one told event by event ----------
-    const story = await read($, storyAtom)
-    const latest = story[story.length - 1]
-    const earlier = story.slice(0, -1).slice(-4)
-    const recap = (tu: StoryTurn) => {
-      const calls = tu.events.filter(ev => TOOLISH.has(ev.kind) || ev.kind === 'error' || ev.kind === 'deny').length
-      const edits = tu.events.filter(ev => ev.kind === 'edit').length
-      const errors = tu.events.filter(ev => ev.kind === 'error' || ev.kind === 'deny').length
-      return [tu.endedAt ? runText(tu.endedAt - tu.startedAt) : '', plural(calls, 'call'), edits ? plural(edits, 'edit') : '', errors ? plural(errors, 'error') : '']
-        .filter(Boolean)
-        .join(' · ')
-    }
-    const log = latest ? cleanLog(latest.events) : []
-    const lastSay = log.map(g => g.kind).lastIndexOf('say')
-    const timelineBody = [
-      ...earlier.map(tu => (
-        <Box key={`tu:${tu.id}`} flexDirection="column" width={inner} flexShrink={0}>
-          <Text key="prompt" wrap="truncate-end" color="subtle">
-            <Text tabular>{`${hhmm(tu.startedAt)}  `}</Text>
-            {promptLabel(tu.prompt, agents) || 'before the reload'}
-          </Text>
-          {note('recap', `       ${recap(tu)}`)}
-        </Box>
-      )),
-      latest ? (
-        <Box key="latest" flexDirection="column" width={inner} marginTop={earlier.length ? 1 : 0} flexShrink={0}>
-          {/* The prompt alone on its line: a long one pushed a right-hand note onto a line of its own off the terminal.
-              "live" already sits in the section's header. */}
-          <Text key="latest-head" wrap="truncate-end">
-            <Text color="ide" tabular>{`${hhmm(latest.startedAt)}  `}</Text>
-            <Text weight="semibold">{promptLabel(latest.prompt, agents) || 'Before the reload'}</Text>
-          </Text>
-          {latest.endedAt ? note('latest-recap', recap(latest)) : null}
-          {log.length
-            ? log.map((g, i) => {
-                const [glyph, tint] = g.kind === 'tools' ? [' ', 'subtle'] : MARKS[g.kind]
-                const bad = g.kind === 'error' || g.kind === 'deny'
-                const said = g.kind === 'say' || g.kind === 'notice' || g.kind === 'prompt'
-                // Columns: when, a mark, then what happened. Claude's words keep their markdown; the rest is one line.
-                const textCols = inner - 9 - 2
-                // The latest reply in full; the earlier ones by their first line, so they leave room for it.
-                const reply = g.kind === 'say' && i === lastSay ? mdLines(g.text) : null
-                const firstLine = g.kind === 'say' && !reply ? (mdLines(g.text).find(Boolean)?.parts.map(pt => pt.text).join('') ?? '') : ''
-                const shown = firstLine ? `${firstLine}${g.text.trim().includes('\n') ? ' …' : ''}` : g.text
-                const wraps = said && !firstLine
-                return (
-                  <Box key={`ev${i}`} flexDirection="row" width={inner} {...(wraps || reply ? {} : { height: H1 })}>
-                    <Box width={9} flexShrink={0}>
-                      <Text color="subtle" tabular>
-                        {g.kind === 'tools' ? '' : hhmmss(g.at)}
-                      </Text>
-                    </Box>
-                    <Box width={2} flexShrink={0}>
-                      <Text color={tint || undefined}>{glyph}</Text>
-                    </Box>
-                    {reply ? (
-                      <Box width={textCols} flexShrink={0} flexDirection="column">
-                        {reply.map((ln, j) =>
-                          ln === null ? (
-                            <Text key={`l${j}`}> </Text>
-                          ) : (
-                            <Box key={`l${j}`} flexDirection="row" width={textCols}>
-                              {ln.lead ? (
-                                <Box width={ln.lead.length} flexShrink={0}>
-                                  <Text color="subtle">{ln.lead}</Text>
-                                </Box>
-                              ) : null}
-                              <Box width={textCols - ln.lead.length} flexShrink={0}>
-                                <Text size="caption" wrap="wrap" bold={ln.heading} weight={ln.heading ? 'semibold' : undefined}>
-                                  {ln.parts.map((pt, k) =>
-                                    pt.style === 'bold' ? (
-                                      <Text key={k} bold weight="semibold">{pt.text}</Text>
-                                    ) : pt.style === 'code' ? (
-                                      <Text key={k} color="permission" mono>{pt.text}</Text>
-                                    ) : pt.style === 'link' ? (
-                                      <Text key={k} color="suggestion" underline>{pt.text}</Text>
-                                    ) : (
-                                      pt.text
-                                    ),
-                                  )}
-                                </Text>
-                              </Box>
-                            </Box>
-                          ),
-                        )}
-                      </Box>
-                    ) : (
-                      <Box width={textCols} flexShrink={0} {...(wraps ? {} : { height: H1, overflow: 'hidden' as const })}>
-                        <Text size="caption" wrap={wraps ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
-                          {shown}
-                        </Text>
-                      </Box>
-                    )}
-                  </Box>
-                )
-              })
-            : [note('quiet', latest.endedAt ? 'An answer with no tool calls.' : 'Thinking…')]}
-        </Box>
-      ) : null,
-    ]
-
-    // In the terminal: a press shows the whole log or goes back to its latest lines; following, what does not fit
-    // leaves by the top, so the latest line stays at the bottom.
-    const timelineShown = Svg
-      ? timelineBody
-      : [
-          <Button key="tl-all" plain dimColor onPress={() => undefined}>
-            {wholeLog ? '↓ Follow the latest' : '↑ Show the whole log'}
-          </Button>,
-          follow ? (
-            <Box key="tail" flexDirection="column" width={inner} flexGrow={1} flexShrink={1} overflow="hidden" justifyContent="flex-end">
-              {timelineBody as never}
-            </Box>
-          ) : (
-            <Box key="tail" flexDirection="column" width={inner} flexShrink={0}>
-              {timelineBody as never}
-            </Box>
-          ),
-        ]
-
     // The line on top: what the chat is doing right now, in one glance.
     const running = agents.filter(a => a.status === 'running').length
     const current = plan.steps.find(st => st.status === 'in_progress')
@@ -2133,7 +1763,7 @@ export const register: Register = on => {
     const limits = [usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : '', usage.sevenDay ? `7d ${pctOf(usage.sevenDay)}%` : ''].filter(Boolean).join(' · ')
 
     return (
-      <Box flexDirection="column" width={width} gap={Svg ? 1 : 0} {...(follow && story.length ? { height: bodyRows } : {})}>
+      <Box flexDirection="column" width={width} gap={Svg ? 1 : 0}>
         {Svg ? (
           <Box key="now" flexDirection="column" width={width} paddingX={1}>
             <Box key="now-top" flexDirection="row" justifyContent="space-between" width={width - 2}>
@@ -2183,7 +1813,6 @@ export const register: Register = on => {
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', agentSummary, agentBody, live > 0) : null}
         {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
-        {story.length ? block('timeline', 'Timeline', latest && !latest.endedAt ? 'live' : plural(story.length, 'prompt'), timelineShown, Boolean(latest && !latest.endedAt)) : null}
       </Box>
     )
   })
