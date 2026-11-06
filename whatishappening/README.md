@@ -20,13 +20,13 @@ A long Claude Code session hides a lot: how close you are to the usage limit, wh
 - **Sections with nothing to show take no room.**
 
 ### Usage
-- **5-hour and 7-day limits:** the percentage used, a bar that turns amber at 70% and red at 90%, the time left and the exact reset time (`in 2h15 · 14:30`).
+- **5-hour and 7-day limits:** the percentage used, a meter of ten squares, green up to the middle, orange past it and red near the end, the time left and the exact reset time (`in 2h15 · 14:30`).
 - **Context:** how full the context window is.
 - **Session tokens:** input, output, cache read and cache write, each API response counted once. No dollar values.
 
 ### Task progress
 - **To-do:** the plan for the current job, with ✓ done, ● in progress and ○ pending.
-- **Progress band:** a line above the prompt, `Tasks 3/5 60%` with a bar, so you can follow the job without opening the pane. It stays at 100% for 20 seconds after the last step, then hides.
+- **Progress band:** a line above the prompt, `Tasks 3/5 60%` with a bar of one segment per step (green done, orange in progress, faint to come) and the step Claude is on, so you can follow the job without opening the pane. It shows while the pane is out of sight, since the To-do header carries the same bar. It stays at 100% for 20 seconds after the last step, then hides.
 
 ![The progress band above the prompt](../docs/band.png)
 

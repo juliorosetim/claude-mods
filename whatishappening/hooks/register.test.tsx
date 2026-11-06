@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { actionMark, agentColors, callTimes, folderLabel, whenText, groupStory, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, groupStory, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -18,6 +18,8 @@ type World = {
   opened?: string[]
   history?: unknown[] | (() => Promise<unknown[]>)
   noLimits?: boolean
+  /** The panes `$.ui.panes()` lists. */
+  panes?: { id: string; isShown: boolean; isPlaced: boolean }[]
   /** stdout for a process.run, by its argv; '' when it gives none. */
   run?: (argv: string[]) => string
   /** What $.prompt.fill put in the prompt box. */
@@ -68,6 +70,7 @@ function world(on: On, w: World = {}) {
     return { isFilled: true } as never
   })
   on('ui.toast', async () => ({ value: undefined }) as never)
+  on('ui.panes', async () => ({ value: (w.panes ?? []).map(p => ({ title: p.id, isFocused: false, ...p })) }) as never)
   on('ui.invalidate', async () => ({ value: undefined }) as never)
   on('ui.open', async ($, e) => {
     opened.push((e as { id: string }).id)
@@ -149,6 +152,18 @@ test('each agent gets a color of its own, the same on every redraw', () => {
   expect(actionMark('Bash npm test')).toBe('run')
   expect(actionMark('GitLab: search issues login')).toBe('connector')
   expect(actionMark('Hand back its report')).toBe('other')
+})
+
+test('the step bar splits its columns among the steps, with a gap when there is room', () => {
+  const sum = (r: { widths: number[]; gap: number }) => r.widths.reduce((a, b) => a + b, 0) + r.gap * (r.widths.length - 1)
+  expect(segmentWidths(5, 30), 'five even segments, four gaps').toEqual({ widths: [6, 5, 5, 5, 5], gap: 1 })
+  expect(sum(segmentWidths(5, 30)), 'fills the bar exactly').toBe(30)
+  expect(segmentWidths(12, 20).gap, 'no room for gaps').toBe(0)
+  expect(segmentWidths(0, 20).widths).toEqual([])
+})
+
+test('a meter\'s cells: green before the middle, orange past it, red near the end', () => {
+  expect(Array.from({ length: 10 }, (_, i) => cellZone(i, 10))).toEqual(['low', 'low', 'low', 'low', 'low', 'mid', 'mid', 'mid', 'high', 'high'])
 })
 
 test('timeline events: a run of one kind is one line, an error or a block says so', () => {
@@ -461,6 +476,7 @@ for (const surface of SURFACES) {
     const band = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'AbovePrompt', props: BAND })
     expect(await band.find({ text: /^Tasks 1\/4 25%$/ }), 'band count').toBeDefined()
     expect(await band.find({ text: /^whatishappening$/ }), 'band label').toBeDefined()
+    expect(await band.find({ text: /^two$/ }), 'the step Claude is on').toBeDefined()
     expect(await band.find({ text: /engine band/ }), 'other bands stay below').toBeDefined()
     if (surface === 'desktop') {
       expect((await band.findAll({ type: 'Svg' })).length, 'desktop draws the bar as a picture').toBe(1)
@@ -575,6 +591,16 @@ for (const surface of SURFACES) {
     expect(await ui.find({ text: /^Read 3 files: a\.ts, c\.ts \+1$/ }), 'three reads, one line').toBeDefined()
     expect(await ui.find({ text: /^Edited a\.ts$/ }), 'the edit').toBeDefined()
     expect(await ui.find({ text: /^Check the tests$/ }), 'the agent it started').toBeDefined()
+  })
+
+  test(`the band hides while the pane is in sight (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const clock = world(on, { panes: [{ id: 'whatishappening', isShown: true, isPlaced: true }] })
+    await $.session.start({ ...START, surface } as never)
+    await ($.tool.call as unknown as Call)({ tool: 'mcp__whatishappening__plan', tool_use_id: 'p1', steps: [{ text: 'one', status: 'in_progress' }] })
+    await clock.settle()
+    const band = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'AbovePrompt', props: BAND })
+    expect(await band.find({ text: /^Tasks/ }), 'the pane already shows it').toBeUndefined()
+    expect(await band.find({ text: /engine band/ }), 'the others stay').toBeDefined()
   })
 
   test(`a finished plan stays at 100% for 20 s, then leaves the band (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

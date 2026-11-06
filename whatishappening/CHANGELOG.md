@@ -4,6 +4,14 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.6.0 - 2026-11-06
+
+- The progress band above the prompt hides while the pane is in sight, as the To-do header shows the same bar; it comes back when the pane closes.
+
+- Usage meters are ten squares instead of a bar: the squares before the middle light green, those past it orange, the last two red, so how close a limit is reads by its color too.
+
+- The task progress is a bar of one segment per step: green done, orange the step in progress, faint the ones to come, so a job that just started shows it is on its first step. It sits in the To-do header and in the band above the prompt, which also names the step Claude is on.
+
 ## 0.5.0 - 2026-11-06
 
 - Usage in the terminal is compact: one row for the context, one for the 5-hour and 7-day limits side by side. The session tokens show only on desktop and VS Code.

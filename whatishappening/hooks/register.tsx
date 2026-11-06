@@ -12,7 +12,6 @@ type Kind = 'connectors' | 'files' | 'skills'
 const ACCENT = '#d97757'
 const INFO = '#2563eb'
 // The status steps of the dataviz palette: a meter's fill turns warning, then critical.
-const WARNING = '#fab219'
 const CRITICAL = '#d03b3b'
 // Desktop pixels per pane column, to size the pictures to the pane.
 const PX_PER_COL = 7.6
@@ -334,6 +333,14 @@ async function note($: EngineInterface, id: string, hits: Hit[]) {
   await update($, usedAtom, used => stamped.reduce(count, used))
   duringSeed?.push(...stamped)
   openOnce($)
+}
+
+async function isPaneInSight($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isShown && p.isPlaced)
+  } catch {
+    return false
+  }
 }
 
 function openOnce($: EngineInterface) {
@@ -692,12 +699,78 @@ function barSvg(part: number, color: string, w: number, boxH: number, track = co
   )
 }
 
-// The Usage meters' own fill below 70%: the mod's purple, the one its icon wears. Its track is a light step of the
-// same purple: the dark purple itself, faded, vanished on a dark pane.
-const USAGE_FILL = '#4f049a'
-const USAGE_TRACK = '#b79be0'
-/** A meter's fill by how full it is: the purple, then warning from 70%, critical from 90%. */
-const severity = (pct: number) => (pct >= 90 ? CRITICAL : pct >= 70 ? WARNING : USAGE_FILL)
+const DONE_GREEN = '#30a46c'
+
+/** How many columns each step's segment gets in a bar `cols` wide: as even as it goes, the extra columns to the
+ * first steps, one column between segments when each has at least two of its own. */
+export function segmentWidths(steps: number, cols: number): { widths: number[]; gap: number } {
+  if (steps <= 0) return { widths: [], gap: 0 }
+  const gap = cols - (steps - 1) >= steps * 2 ? 1 : 0
+  const room = Math.max(steps, cols - gap * (steps - 1))
+  const base = Math.floor(room / steps)
+  return { widths: Array.from({ length: steps }, (_, i) => base + (i < room % steps ? 1 : 0)), gap }
+}
+
+/** The plan as a bar of one segment per step: green done, orange the one in progress, faint the ones to come. */
+function stepsSvg(steps: readonly PlanStep[], w: number, boxH: number): string {
+  const gap = 3
+  const seg = Math.max(2, (w - gap * (steps.length - 1)) / steps.length)
+  const y = (boxH - 8) / 2
+  const rects = steps
+    .map((st, i) => {
+      const fill = st.status === 'completed' ? DONE_GREEN : st.status === 'in_progress' ? ACCENT : '#80808055'
+      return `<rect x="${(i * (seg + gap)).toFixed(1)}" y="${y}" width="${seg.toFixed(1)}" height="8" rx="3" fill="${fill}"/>`
+    })
+    .join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${boxH}" width="${w}" height="${boxH}">${rects}</svg>`
+}
+
+/** Which stretch of a meter a cell sits in: green before the middle, orange past it, red near the end. */
+export function cellZone(i: number, cells: number): 'low' | 'mid' | 'high' {
+  const at = (i + 0.5) / cells
+  return at < 0.5 ? 'low' : at < 0.8 ? 'mid' : 'high'
+}
+const ZONE_TEXT = { low: 'success', mid: 'claude', high: 'error' } as const
+const ZONE_HEX = { low: DONE_GREEN, mid: ACCENT, high: CRITICAL } as const
+const METER_CELLS = 10
+
+/** A meter as square cells, `part` of them lit, each in the color of its stretch. */
+function cellsSvg(part: number, w: number, boxH: number): string {
+  const lit = Math.round(Math.min(1, Math.max(0, part)) * METER_CELLS)
+  const gap = 3
+  const cell = (w - gap * (METER_CELLS - 1)) / METER_CELLS
+  const size = Math.min(cell, boxH)
+  const y = (boxH - size) / 2
+  const rects = Array.from({ length: METER_CELLS }, (_, i) => {
+    const fill = i < lit ? ZONE_HEX[cellZone(i, METER_CELLS)] : '#80808045'
+    return `<rect x="${(i * (cell + gap)).toFixed(1)}" y="${y.toFixed(1)}" width="${cell.toFixed(1)}" height="${size.toFixed(1)}" rx="2" fill="${fill}"/>`
+  }).join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${boxH}" width="${w}" height="${boxH}">${rects}</svg>`
+}
+
+/** The same bar in text, `cols` wide; `Text` is the surface's own. */
+function stepsText(Text: (p: Record<string, unknown>) => unknown, steps: readonly PlanStep[], cols: number) {
+  const { widths, gap } = segmentWidths(steps.length, cols)
+  return (
+    <Text>
+      {steps.flatMap((st, i) => {
+        const w = widths[i]!
+        const cell =
+          st.status === 'pending' ? (
+            <Text key={`s${i}`} dimColor>
+              {'░'.repeat(w)}
+            </Text>
+          ) : (
+            <Text key={`s${i}`} color={st.status === 'completed' ? 'success' : 'claude'}>
+              {'█'.repeat(w)}
+            </Text>
+          )
+        return i && gap ? [<Text key={`g${i}`}> </Text>, cell] : [cell]
+      })}
+    </Text>
+  )
+}
+
 
 // ---------- the timeline ----------
 
@@ -893,6 +966,18 @@ function ageText(ms: number): string {
 const byNewest = (rows: Record<string, Tally>) => Object.entries(rows).sort(([, a], [, b]) => b.last - a.last)
 
 export const register: Register = on => {
+  // The band hides while the pane is in sight: redraw it when the pane opens or closes.
+  on('ui.open', async ($, e, next) => {
+    const done = await next(e)
+    void $.ui.invalidate('ui.render')
+    return done
+  }).catch(($, e, next) => next(e))
+  on('ui.close', async ($, e, next) => {
+    const done = await next(e)
+    void $.ui.invalidate('ui.render')
+    return done
+  }).catch(($, e, next) => next(e))
+
   on('session.start', async ($, e, next) => {
     home = $.plugin.root.split('/.claude/')[0] ?? ''
     // An installed copy may sit outside ~/.claude (a local marketplace): ask the shell for the home folder.
@@ -1145,6 +1230,8 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return below
     const plan = await read($, planAtom)
     if (!plan.steps.length) return below
+    // The pane's To-do already shows the same bar: the band is for when the pane is not in sight.
+    if (await isPaneInSight($)) return below
     // A finished plan shows at 100% for a while, then the band goes back to the others'.
     if (plan.steps.every(st => st.status === 'completed')) {
       const left = plan.updatedAt + DONE_HOLD_MS - (await $.clock.now())
@@ -1163,8 +1250,9 @@ export const register: Register = on => {
     const done = plan.steps.filter(st => st.status === 'completed').length
     const pct = Math.round((done / plan.steps.length) * 100)
     const label = `Tasks ${done}/${plan.steps.length} ${pct}%`
-    const barCols = Math.max(8, cols - PLUGIN.length - label.length - 6)
-    const fill = Math.round((done / plan.steps.length) * barCols)
+    // One segment per step, then the step Claude is on, which a narrow band cuts first.
+    const current = plan.steps.find(st => st.status === 'in_progress')
+    const barCols = Math.max(8, Math.min(plan.steps.length * 6, 40, cols - PLUGIN.length - label.length - 6))
     return (
       <Box flexDirection="column">
         <Box key="wih-band" flexDirection="row" width={cols} height={1} gap={1}>
@@ -1175,17 +1263,18 @@ export const register: Register = on => {
           <Box flexShrink={0}>
             <Text color={ACCENT} bold>{label}</Text>
           </Box>
-          {/* The bar last: where the band is narrower than it says, the bar is cut, never the count. */}
           {Svg ? (
-            <Svg source={barSvg(done / plan.steps.length, ACCENT, BAR_PX, BAR_H)} alt={`${pct}% done`} width={BAR_PX} height={BAR_H} />
+            <Svg source={stepsSvg(plan.steps, BAR_PX, BAR_H)} alt={`${done} of ${plan.steps.length} steps done`} width={BAR_PX} height={BAR_H} />
           ) : (
-            <Box flexShrink={1} overflow="hidden" height={1}>
-              <Text>
-                <Text color={ACCENT}>{'█'.repeat(fill)}</Text>
-                <Text dimColor>{'░'.repeat(barCols - fill)}</Text>
-              </Text>
+            <Box flexShrink={0} height={1}>
+              {stepsText(Text as never, plan.steps, barCols) as never}
             </Box>
           )}
+          {current ? (
+            <Box flexShrink={1} overflow="hidden" height={1}>
+              <Text wrap="truncate-end">{current.active || current.text}</Text>
+            </Box>
+          ) : null}
         </Box>
         {(below ?? null) as never}
       </Box>
@@ -1227,7 +1316,7 @@ export const register: Register = on => {
     const capped = (key: string, rows: unknown[]) =>
       rows.length > MAX_ROWS ? [...rows.slice(0, MAX_ROWS), note(`${key}-more`, `+${rows.length - MAX_ROWS} more`)] : rows
     // A section: its color on the border, the dot and the summary; the border dims while nothing in it is moving.
-    const block = (id: (typeof SECTIONS)[number], title: string, right: string, body: unknown, isActive = true) => {
+    const block = (id: (typeof SECTIONS)[number], title: string, right: string, body: unknown, isActive = true, bar?: unknown) => {
       const shut = !Svg && folded.includes(id)
       const tint = SECTION_COLOR[id]
       const head = Svg ? (
@@ -1236,6 +1325,7 @@ export const register: Register = on => {
             <Text color={tint}>● </Text>
             <Text weight="semibold">{title}</Text>
           </Text>
+          {bar ? (bar as never) : null}
           {right ? (
             <Text size="caption" color={tint} tabular>
               {right}
@@ -1248,6 +1338,7 @@ export const register: Register = on => {
             <Text color={tint}>{shut ? '▸ ' : '▾ '}</Text>
             <Text bold>{title}</Text>
           </Button>
+          {bar ? (bar as never) : null}
           {right ? <Text color={tint}>{right}</Text> : null}
         </Box>
       )
@@ -1283,7 +1374,7 @@ export const register: Register = on => {
           <Text key="value" size="heading" weight="semibold" tabular dimColor={Boolean(l?.asOf)}>
             {l && !isOver(l) ? `${pctOf(l)}%` : '–'}
           </Text>
-          {l && !isOver(l) ? <Svg key="bar" source={barSvg(l.percent / 100, severity(l.percent), px(tileCols), 8, USAGE_TRACK)} alt={`${label}: ${pctOf(l)}% used`} width={px(tileCols)} height={8} /> : null}
+          {l && !isOver(l) ? <Svg key="bar" source={cellsSvg(l.percent / 100, px(tileCols), 10)} alt={`${label}: ${pctOf(l)}% used`} width={px(tileCols)} height={10} /> : null}
           {note('reset', l ? tailOf(l) || ' ' : 'no reading yet')}
           {l && isOver(l) ? note('next', 'new reading after the next reply') : null}
         </Box>
@@ -1296,7 +1387,7 @@ export const register: Register = on => {
         usage.contextWindow ? (
           <Box key="ctx" flexDirection="column" width={inner} marginTop={1}>
             {line('ctx-figs', note('l', `Context · ${Math.round(ctxPct)}%`), note('r', ctxTail))}
-            <Svg key="bar" source={barSvg(ctxPct / 100, severity(ctxPct), px(inner), 8, USAGE_TRACK)} alt={`Context: ${Math.round(ctxPct)}% full`} width={px(inner)} height={8} />
+            <Svg key="bar" source={cellsSvg(ctxPct / 100, px(inner), 10)} alt={`Context: ${Math.round(ctxPct)}% full`} width={px(inner)} height={10} />
           </Box>
         ) : null,
         <Box key="tok" flexDirection="column" width={inner} marginTop={1}>
@@ -1312,14 +1403,23 @@ export const register: Register = on => {
       ]
     } else {
       // Compact: one row for the context and one for the two limits (side by side when they fit).
-      const BAR = 10
+      const BAR = METER_CELLS
       const meter = (key: string, label: string, pct: number, tail: string) => {
         const fill = Math.round((Math.min(100, Math.max(0, pct)) / 100) * BAR)
         return (
           <Text key={key} wrap="truncate-end">
             <Text dimColor>{`${label.padEnd(4)}`}</Text>
-            <Text color={severity(pct)}>{'█'.repeat(fill)}</Text>
-            <Text dimColor>{'░'.repeat(BAR - fill)}</Text>
+            {Array.from({ length: BAR }, (_, i) =>
+              i < fill ? (
+                <Text key={`c${i}`} color={ZONE_TEXT[cellZone(i, BAR)]}>
+                  ■
+                </Text>
+              ) : (
+                <Text key={`c${i}`} dimColor>
+                  ■
+                </Text>
+              ),
+            )}
             <Text> </Text>
             <Text bold>{`${Math.round(pct)}%`}</Text>
             {tail ? <Text dimColor>{` ${tail}`}</Text> : null}
@@ -1781,6 +1881,17 @@ export const register: Register = on => {
     const aside = [current && running ? plural(running, 'agent') : '', usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : ''].filter(Boolean).join(' · ')
     const totalCalls = conns.reduce((n, [, t]) => n + t.count, 0)
     const pctDone = plan.steps.length ? Math.round((done / plan.steps.length) * 100) : 0
+    // The To-do header's own bar, between its title and its count: one segment per step.
+    const todoBarCols = Math.max(0, inner - 'To-do'.length - 2 - `${done}/${plan.steps.length} · ${pctDone}%`.length - 4)
+    const todoBar = !plan.steps.length || todoBarCols < plan.steps.length
+      ? null
+      : Svg ? (
+          <Svg key="steps" source={stepsSvg(plan.steps, px(todoBarCols), 16)} alt={`${done} of ${plan.steps.length} steps done`} width={px(todoBarCols)} height={16} />
+        ) : (
+          <Box key="steps" flexShrink={0} height={1}>
+            {stepsText(Text as never, plan.steps, todoBarCols) as never}
+          </Box>
+        )
     const limits = [usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : '', usage.sevenDay ? `7d ${pctOf(usage.sevenDay)}%` : ''].filter(Boolean).join(' · ')
 
     return (
@@ -1828,7 +1939,7 @@ export const register: Register = on => {
         )}
         {block('usage', 'Usage', limits, usageBody)}
         {/* Sections with nothing to show take no room. */}
-        {plan.steps.length ? block('todo', 'To-do', `${done}/${plan.steps.length} · ${pctDone}%`, todoBody, done < plan.steps.length) : null}
+        {plan.steps.length ? block('todo', 'To-do', `${done}/${plan.steps.length} · ${pctDone}%`, todoBody, done < plan.steps.length, todoBar) : null}
         {files.length ? block('files', 'Context files', plural(files.length, 'file'), fileBody) : null}
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', agentSummary, agentBody, live > 0) : null}
