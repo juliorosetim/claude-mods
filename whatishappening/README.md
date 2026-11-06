@@ -31,7 +31,7 @@ A long Claude Code session hides a lot: how close you are to the usage limit, wh
 ![The progress band above the prompt](../docs/band.png)
 
 ### Agents
-Every subagent the chat starts gets a card of its own, live ones first:
+Every subagent the chat starts gets a card of its own, in a color of its own, under **Running** or **Finished**:
 
 ```
 ╭──────────────────────────────────────────╮
@@ -39,24 +39,26 @@ Every subagent the chat starts gets a card of its own, live ones first:
 │ Find the auth code                       │
 │ Opus 5.5 · 6 tools · 12.4k tokens        │
 │                                          │
-│ ✓ Read todo.py                           │
-│ ✓ Grep "def add"                         │
+│ › Read todo.py                           │
+│ ⌕ Grep "def add"                         │
 │ ● Bash python -m pytest -q               │
 ╰──────────────────────────────────────────╯
 ```
 
 - **Top of the card:** the agent type and how long it has run, then its task. In the terminal the clock ticks by itself.
 - **Facts:** the model, how many tool calls it made and the tokens it spent.
-- **Latest steps:** ✓ for the ones it finished, ● for the one it is on.
+- **Latest steps:** with the Timeline's marks (`$` command, `›` read, `✎` edit), ● for the one it is on.
+- **Finished agents fold** to one line each in their color: the task, how long it ran, its tokens and when it finished. In the terminal, press one to open its card and its latest steps.
 - **Its own to-do list:** when the agent keeps one (TodoWrite, the Task tools or the plan tool), the card shows that list with a progress bar instead. An agent does not say in advance how many steps it will take, so there is no made-up percentage.
 - **Layout:**
   - two or three agents sit side by side when the pane is wide enough;
-  - with more than three, each agent gets an **activity lane** on a shared time axis.
+  - with more than three at work, each one gets an **activity lane** in its color, on a shared time axis.
 
 ```
 ● Map the hooks     ▂▅█▇▃·····              ◐ 0m 42s
-✓ Review README     ▃▆▄▂                       0m 18s
+● Review README     ▃▆▄▂▁▃▅                 ◐ 0m 38s
 ● Count tests          ·▁▃▅▇█▆▃▁            ◐ 0m 31s
+● Check versions      ▁▂▃▂▁                 ◐ 0m 20s
 ```
 
 A bar's height is how many calls the agent made in that moment, so you can see who is busy, who is waiting and who is done.
@@ -76,19 +78,20 @@ Every section folds with its header.
 What happened, prompt by prompt, at the bottom of the pane:
 
 ```
-09:41  look at the parser            1m 30s · 2 calls
-14:02  now fix it                                live
-›  Read 3 files: a.ts, c.ts +1
-✎  Edited a.ts
-◆  Check the tests  · Explore
-›  Read parser.test.ts  · Explore
-$  Ran npm test
-✓  Step done: Fix the parser
+09:41  look at the parser
+       1m 30s · 2 calls
+14:02  now fix it
+14:02:11 › Claude     Read 3 files: a.ts, c.ts +1
+14:02:15 ✎ Claude     Edited a.ts
+14:02:18 ◆ Claude     Check the tests
+14:02:20 › Explore    Read parser.test.ts
+14:02:31 $ Claude     Ran npm test
+14:02:40 ✓ Claude     Step done: Fix the parser
 ```
 
 - **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
 - **The latest prompt:** event by event. Events in a row of one kind become one line, so five reads are `Read 5 files`, not five lines.
-- **Marks:** ✎ edit, $ command, ⌕ search, › read, ◍ web, ⇄ connector, ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked. A subagent's events carry its type.
+- **Marks:** ✎ edit, $ command, ⌕ search, › read, ◍ web, ⇄ connector, ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked. Each event has its time to the second and who did it: Claude, or the subagent's type.
 
 ### Sessions
 `/sessions` opens a second pane with your recent sessions, grouped by the folder each one ran in, this folder first. Each row has the session's title, or its first prompt, and how long ago it ran. The chat you are in is marked.

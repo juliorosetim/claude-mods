@@ -57,6 +57,8 @@ export type AgentRow = {
   startedAt: number
   /** Order of last activity: higher is newer. */
   seq: number
+  /** True once agent.spawn or the history named it: the chat started it, so it is no engine fork. */
+  known?: boolean
   /** True once $.agent.list() named it; a workflow's agents never are, so leaving the list is no sign they ended. */
   listed?: boolean
   /** What it runs on, as the engine names it: "claude-opus-5-5", or an alias such as "haiku". */

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { folderLabel, groupStory, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { actionMark, agentColors, callTimes, folderLabel, whenText, groupStory, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -75,7 +75,8 @@ function world(on: On, w: World = {}) {
   })
   on('tool.call', async () => ({ result: 'ok' }) as never)
   on('agent.list', async () => ({ value: [] }) as never)
-  on('agent.spawn', async () => ({ model: 'opus', agentId: 'ag1' }) as never)
+  // A test names the id a spawn answers with `id`; ag1 when it does not.
+  on('agent.spawn', async ($, e) => ({ model: 'opus', agentId: (e as { id?: string }).id ?? 'ag1' }) as never)
   on('turn.complete', async () => ({ text: '' }) as never)
   on('turn.start', async ($, e) => ({ turnId: (e as { turnId: string }).turnId }) as never)
   on('prompt.submit', async ($, e) => e as never)
@@ -128,6 +129,28 @@ test('sessions are grouped by folder, the most recent folder first, titled or na
   expect(sessionGroups('garbage\n\n'), 'a line that is no session is skipped').toEqual([])
 })
 
+test('call times come from the transcript: each tool_use id gets its line\'s timestamp', () => {
+  const out = ['"tool_use","id":"toolu_a"', '"tool_use","id":"toolu_b"', '"timestamp":"2026-11-05T14:00:00.000Z"', '"timestamp":"2026-11-05T14:01:00.000Z"', '"tool_use","id":"toolu_c"', '"timestamp":"2026-11-05T14:02:00.000Z"'].join('\n')
+  const t = callTimes(out)
+  expect(t.get('toolu_a'), 'two calls in one line share its time').toBe(Date.parse('2026-11-05T14:00:00.000Z'))
+  expect(t.get('toolu_b')).toBe(Date.parse('2026-11-05T14:00:00.000Z'))
+  expect(t.get('toolu_c'), 'a line without calls moves nothing').toBe(Date.parse('2026-11-05T14:02:00.000Z'))
+  expect(callTimes('').size).toBe(0)
+  const now = new Date(2026, 10, 6, 15, 0).getTime()
+  expect(whenText(new Date(2026, 10, 6, 9, 5).getTime(), now), 'today: the time').toBe('09:05')
+  expect(whenText(new Date(2026, 10, 5, 11, 12).getTime(), now), 'before: the date too').toBe('Nov 5, 11:12')
+})
+
+test('each agent gets a color of its own, the same on every redraw', () => {
+  const ids = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6']
+  const c = agentColors(ids)
+  expect(new Set(c.values()).size, 'no two agents share one').toBe(ids.length)
+  expect(agentColors([...ids].reverse()).get('c3'), 'order does not move it').toBe(c.get('c3'))
+  expect(actionMark('Bash npm test')).toBe('run')
+  expect(actionMark('GitLab: search issues login')).toBe('connector')
+  expect(actionMark('Hand back its report')).toBe('other')
+})
+
 test('timeline events: a run of one kind is one line, an error or a block says so', () => {
   const ev = (kind: string, text: string, who?: string) => ({ at: 1, kind, text, ...(who ? { who } : {}) }) as never
   const groups = groupStory([ev('read', 'a.ts'), ev('read', 'b.ts'), ev('read', 'c.ts'), ev('read', 'd.ts', 'Explore'), ev('edit', 'a.ts'), ev('step', 'Ship it')])
@@ -177,7 +200,7 @@ for (const surface of SURFACES) {
     expect(opened, 'the pane opened by itself').toContain('whatishappening')
 
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    for (const t of [/GitLab/, /Slack/, /^2 calls$/, /^1 call$/, /app\.ts/, /CLAUDE\.md/, /release-notes/, /house-style/, /^at start$/]) {
+    for (const t of [/GitLab/, /Slack/, /^2 calls · \d\d:\d\d$/, /^1 call( · \d\d:\d\d)?$/, /app\.ts/, /CLAUDE\.md/, /release-notes/, /house-style/, /^at start$/]) {
       expect(await ui.find({ text: t }), `${t} shows`).toBeDefined()
     }
     expect(await ui.find({ type: 'Text', text: /^scratch\.txt$/ }), 'temp files are not context (the timeline still tells the read)').toBeUndefined()
@@ -306,12 +329,18 @@ for (const surface of SURFACES) {
     await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't', agentId: 'ag1', reason: 'answer', usage } as never)
     await clock.advance(30_000)
     ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ text: /completed · Opus 5\.5 · 2 tools · 1\.2k tokens/ }), 'done, with the exact model and its tokens').toBeDefined()
+    expect(await ui.find({ text: /^0 running · 1 done · 1\.2k tokens$/ }), 'none running, with the agents\' tokens').toBeDefined()
+    expect(await ui.find({ text: /^Finished · 1/ }), 'in the Finished group').toBeDefined()
+    expect(await ui.find({ text: /^1m 05s · 1\.2k · \d\d:\d\d$/ }), 'one line: how long, its tokens, when it finished').toBeDefined()
+    expect(await ui.find({ text: /^Grep login$/ }), 'a finished agent is folded').toBeUndefined()
     if (surface === 'terminal') {
+      await ui.press({ key: 'ag:ag1' })
+      expect(await ui.find({ text: /^Opus 5\.5 · 2 tools · 1\.2k tokens$/ }), 'a press opens its card: the exact model and its tokens').toBeDefined()
+      expect(await ui.find({ text: /^Finished \d\d:\d\d$/ }), 'when it finished').toBeDefined()
+      expect(await ui.find({ text: /^Grep login$/ }), 'and its steps').toBeDefined()
       const ended = (await ui.find({ type: 'Client' }))?.props as { props: { since: number; endAt: number | null } } | undefined
       expect((ended?.props.endAt ?? 0) - (ended?.props.since ?? 0), 'the run time stops at the end').toBe(65_000)
-    } else expect(await ui.find({ type: 'Text', text: /^1m 05s$/ }), 'the run time stops at the end').toBeDefined()
-    expect(await ui.find({ text: /^0 running · 1 done$/ }), 'none running').toBeDefined()
+    }
   })
 
   test(`each agent is a card: its steps as a trail, or its own to-do list with a count (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -326,7 +355,7 @@ for (const surface of SURFACES) {
     let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     const row = async (re: RegExp) => (await ui.findAll({ type: 'Text', text: re })).map(t => String(t.text))
     expect(await row(/^Grep login$/), 'the earlier step').toHaveLength(1)
-    expect(await row(/^Read auth\.ts$/), 'the step it is on').toHaveLength(1)
+    expect(await row(/^Read auth\.ts$/), 'the step it is on: on the card, and in the timeline').toHaveLength(2)
     expect((await ui.findAll({ type: 'Text', text: /^●$/ })).length, 'one live mark for the type, one for the step').toBe(2)
     await ui.unmount()
 
@@ -347,17 +376,20 @@ for (const surface of SURFACES) {
     await $.session.start({ ...START, surface } as never)
     await clock.settle()
     const call = $.tool.call as unknown as Call
+    const spawn = (id: string) => $.agent.spawn({ prompt: 'p', description: `job ${id}`, subagentType: 'Explore', id } as never)
+    for (const id of ['w1', 'w2']) await spawn(id)
     await call({ tool: 'Grep', tool_use_id: 'x1', agentId: 'w1', pattern: 'a' })
     await call({ tool: 'Grep', tool_use_id: 'x2', agentId: 'w2', pattern: 'b' })
     await clock.settle()
     const wide = { ...(PANE as object), bodyColumns: 64 } as never
     let ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: wide })
-    expect(await ui.find({ key: 'cards' }), 'two cards in one row').toBeDefined()
+    expect(await ui.find({ key: 'run-cards' }), 'two cards in one row').toBeDefined()
     expect(await ui.find({ key: 'lane:w1' }), 'no lanes yet').toBeUndefined()
     await ui.unmount()
 
     for (const id of ['w3', 'w4', 'w5']) {
       await clock.advance(5000)
+      await spawn(id)
       await call({ tool: 'Read', tool_use_id: `r-${id}`, agentId: id, file_path: `/home/dev/project/${id}.ts` })
     }
     await call({ tool: 'Grep', tool_use_id: 'x3', agentId: 'w5', pattern: 'c' })
@@ -370,14 +402,21 @@ for (const surface of SURFACES) {
     else expect(await ui.find({ text: /^█$/ }), 'the busiest moment is a full bar').toBeDefined()
   })
 
-  test(`a workflow agent, never in the agent list, stays running (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+  test(`a workflow agent, never in the agent list, stays running; an engine fork is no agent (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
     const clock = world(on)
     await $.session.start({ ...START, surface } as never)
     await clock.settle()
+    // A workflow script's agent() goes through agent.spawn, with no type.
+    await $.agent.spawn({ prompt: 'p', description: 'wf step', id: 'wf1' } as never)
     await ($.tool.call as unknown as Call)({ tool: 'Grep', tool_use_id: 'w1', agentId: 'wf1', pattern: 'todo' })
+    // An engine fork (compaction, memory) carries an agent id too, but no spawn ever named it.
+    await ($.tool.call as unknown as Call)({ tool: 'Bash', tool_use_id: 'f1', agentId: 'fork1', command: 'true' })
+    await ($.tool.call as unknown as Call)({ tool: 'Read', tool_use_id: 'f2', agentId: 'fork1', file_path: '/home/dev/project/secret-notes.md' })
     await clock.advance(7000)
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
-    expect(await ui.find({ text: /^1 running · 0 done$/ }), 'still running after two list checks').toBeDefined()
+    expect(await ui.find({ text: /^1 running · 0 done$/ }), 'still running after two list checks, and the fork is no agent').toBeDefined()
+    expect(await ui.find({ text: /secret-notes/ }), 'nor are its reads context files').toBeUndefined()
+    expect(await ui.find({ text: /Ran true/ }), 'nor its commands in the timeline').toBeUndefined()
   })
 
   test(`after a reload a new agent sorts above older ones (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
@@ -413,8 +452,11 @@ for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     for (const [t, why] of [
       [/^11%$/, '5h used'], [/in 2h15 · /, '5h countdown and reset'], [/^6%$/, '7d used'], [/in 3d23h/, '7d countdown'],
-      [/53\.3k of 1\.0M/, 'context'], [/^2\.3k$/, 'session total, each message once'], [/out 70/, 'output tokens'],
+      [/53\.3k of 1\.0M/, 'context'],
     ] as const) expect(await ui.find({ text: t }), why).toBeDefined()
+    // The terminal leaves the session tokens out, to keep Usage short.
+    expect(await ui.find({ text: /^2\.3k$/ }), 'session total, each message once').toEqual(surface === 'terminal' ? undefined : expect.anything())
+    expect(await ui.find({ text: /out 70/ }), 'output tokens').toEqual(surface === 'terminal' ? undefined : expect.anything())
 
     const band = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'AbovePrompt', props: BAND })
     expect(await band.find({ text: /^Tasks 1\/4 25%$/ }), 'band count').toBeDefined()

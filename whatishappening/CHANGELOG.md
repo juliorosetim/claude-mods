@@ -4,6 +4,18 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.5.0 - 2026-11-06
+
+- Usage in the terminal is compact: one row for the context, one for the 5-hour and 7-day limits side by side. The session tokens show only on desktop and VS Code.
+- Connectors: each one shows when it was last used (`6 calls · 14:02`, or `Nov 5, 11:12` before today), also for calls read back from the history after `/reload-plugins`.
+- Timeline: each event of the latest prompt reads in columns: the time to the second, its mark, who did it (Claude, or the agent's type, in bold) and what happened. A failure is red across the row.
+- Agents: each agent's card wears a color of its own, on its border, its name and its bar, so every card reads as one agent.
+- Agents are grouped under **Running** and **Finished**. A finished agent is one line in its color, `✓ Explore  Check the docs   57s · 391k · 11:30`, so the list stays short however many ran; in the terminal, a press opens its card with the model, when it finished (`Finished 11:30`, or `Nov 5, 11:12` before today) and its latest steps.
+- Activity lanes wear each agent's color, on its name and its bars.
+- An agent's steps carry the Timeline's marks (`$` command, `›` read, `✎` edit…).
+- Claude Code's own background work (compaction, memory), which runs as an agent of its own, no longer shows as an `agent` card, and its reads and commands no longer count as the chat's files or Timeline events.
+- The Agents header adds the agents' tokens: `1 running · 4 done · 1.4M tokens`.
+
 ## 0.4.2 - 2026-11-06
 
 - Timeline: a message an agent or Claude Code sent in place of a prompt reads as words, such as `Report from Explore: Find the auth code`, not as its raw tags.

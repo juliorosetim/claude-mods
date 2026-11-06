@@ -22,7 +22,7 @@ const MAX_ROWS = 15
 const MAX_CALLS = 30
 const MAX_AGENTS = 30
 // Steps kept per agent for its card, the last one the step it is on.
-const TRAIL = 6
+const TRAIL = 12
 // Call times kept per agent, for its activity lane.
 const BEATS = 120
 // Each section's own color, a theme key, so light, dark and colorblind themes all read.
@@ -121,6 +121,7 @@ const BAR_H = 18
 
 const pad = (n: number) => String(n).padStart(2, '0')
 const hhmm = (ms: number) => (ms ? `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}` : '')
+const hhmmss = (ms: number) => (ms ? `${hhmm(ms)}:${pad(new Date(ms).getSeconds())}` : '')
 const plural = (n: number, word: string) => (n === 1 ? `1 ${word}` : `${n} ${word}s`)
 const kTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n))
 const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
@@ -184,6 +185,45 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 function resetText(at: number, now: number): string {
   const d = new Date(at)
   return `${new Date(now).toDateString() === d.toDateString() ? '' : `${WEEKDAYS[d.getDay()]} `}${hhmm(at)}`
+}
+
+// An agent's own color, so each card reads as one agent at a glance. Bright enough on dark and light themes, and
+// none of them the red that means a failure.
+const AGENT_COLORS = ['#3e9bff', '#30a46c', '#f76b15', '#a463e8', '#12a594', '#d6409f', '#e6a700', '#6e6ef0', '#7fa83a', '#e5734c']
+
+/** A color for each agent: picked by its id, so it stays the same on every redraw and reload, and moved to the next
+ * free one when two agents on screen would share it. */
+export function agentColors(ids: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>()
+  const taken = new Set<number>()
+  for (const id of [...ids].sort()) {
+    let h = 0
+    for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+    let i = h % AGENT_COLORS.length
+    for (let k = 0; k < AGENT_COLORS.length && taken.has(i); k++) i = (i + 1) % AGENT_COLORS.length
+    taken.add(i)
+    out.set(id, AGENT_COLORS[i]!)
+  }
+  return out
+}
+
+/** The Timeline's mark for one step of an agent, read from its words ("Read auth.ts", "Bash npm test"). */
+export function actionMark(action: string): StoryEvent['kind'] {
+  const tool = action.split(' ')[0] ?? ''
+  if (/:$/.test(tool)) return 'connector'
+  if (tool === 'Read') return 'read'
+  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') return 'edit'
+  if (tool === 'Bash') return 'run'
+  if (tool === 'Grep' || tool === 'Glob') return 'search'
+  if (tool === 'WebFetch' || tool === 'WebSearch') return 'web'
+  return 'other'
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** When something happened: the time today, the date and time before. */
+export function whenText(at: number, now: number): string {
+  const d = new Date(at)
+  return new Date(now).toDateString() === d.toDateString() ? hhmm(at) : `${MONTHS[d.getMonth()]} ${d.getDate()}, ${hhmm(at)}`
 }
 
 async function logError($: EngineInterface, where: string, err: unknown) {
@@ -443,6 +483,33 @@ async function totalsOf($: EngineInterface, path: string) {
   return tokenTotals(String(await $.fs.read(path)))
 }
 
+/** When each tool call was made, by its id, from `grep -o` of the transcript: a line's tool_use ids come before its
+ * timestamp. */
+export function callTimes(out: string): Map<string, number> {
+  const times = new Map<string, number>()
+  let waiting: string[] = []
+  for (const l of out.split('\n')) {
+    const id = /"id":"(toolu_[^"]+)"/.exec(l)?.[1]
+    if (id) waiting.push(id)
+    const ts = /"timestamp":"([^"]+)"/.exec(l)?.[1]
+    if (!ts) continue
+    const at = Date.parse(ts)
+    if (at) for (const w of waiting) times.set(w, at)
+    waiting = []
+  }
+  return times
+}
+
+/** The main chat's call times; empty when the transcript cannot be read (its calls then show no time). */
+async function timesOf($: EngineInterface): Promise<Map<string, number>> {
+  try {
+    const r = await $.process.run(['grep', '-oE', '"tool_use","id":"toolu_[^"]+"|"timestamp":"[^"]+"', await transcriptPath($)])
+    return callTimes(r.stdout)
+  } catch {
+    return new Map()
+  }
+}
+
 /** Reads limits, context and, when asked, the transcript's token totals. Never throws. */
 async function refreshUsage($: EngineInterface, withTokens: boolean) {
   try {
@@ -492,6 +559,11 @@ async function upsertAgent($: EngineInterface, id: string, change: (old: AgentRo
     return [...rows.filter(r => r.id !== id), { ...old, ...change(old), seq }].slice(-MAX_AGENTS)
   })
 }
+
+/** An agent the chat started (seen by agent.spawn, the engine's list or the history), not one of the engine's own
+ * forks (compaction, memory), whose calls carry an agent id too. Rows stored before `known` existed go by their type,
+ * which only the spawn, the list or the history set. */
+export const isKnown = (r: AgentRow) => Boolean(r.known || r.listed || r.type !== 'agent')
 
 /** Takes status, type and description from the engine's agent list. An agent the list dropped, and once named, has ended. */
 async function syncAgents($: EngineInterface) {
@@ -554,6 +626,7 @@ async function recount($: EngineInterface) {
       const lastUse = uses[uses.length - 1]
       // An agent from before the reload: done, unless the engine's list says otherwise (syncAgents).
       await upsertAgent($, u.agentId, old => ({
+        known: true,
         // A row first seen in the history: when it started is unknown, so no run time is shown.
         startedAt: old.type === 'agent' && !old.tools ? 0 : old.startedAt,
         type: old.type !== 'agent' ? old.type : text(u.input.subagent_type) || 'general-purpose',
@@ -577,6 +650,7 @@ async function recount($: EngineInterface) {
   }
 
   const hits: Stamped[] = []
+  const times = await timesOf($)
   for (const m of all) {
     if (m.role === 'user' && typeof m.text === 'string') {
       const typed = TYPED.exec(m.text.trim())
@@ -588,7 +662,7 @@ async function recount($: EngineInterface) {
       const found = usesOf(u.tool, u.input)
       if (!found.length) continue
       counted.add(u.tool_use_id)
-      hits.push(...found.map(h => stamp(h, 0)))
+      hits.push(...found.map(h => stamp(h, times.get(u.tool_use_id) ?? 0)))
     }
   }
   if (!hits.length) return
@@ -958,7 +1032,7 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!ran.agentId) return ran
     try {
-      await upsertAgent($, ran.agentId, () => ({ type: e.subagentType, description: e.description, status: 'running', model: ran.model }))
+      await upsertAgent($, ran.agentId, () => ({ type: e.subagentType || 'general-purpose', description: e.description, status: 'running', model: ran.model, known: true }))
       await tell($, { at: await $.clock.now(), kind: 'agent', text: e.description || 'started', who: e.subagentType })
       openOnce($)
     } catch (err) {
@@ -987,6 +1061,7 @@ export const register: Register = on => {
       ...(u?.model ? { model: u.model } : {}),
     }))
     const row = (await read($, agentsAtom)).find(r => r.id === e.agentId)
+    if (!row || !isKnown(row)) return ran
     const took = row?.startedAt ? ` in ${runText(now - row.startedAt)}` : ''
     await tell($, { at: now, kind: e.isAborted ? 'error' : 'agent-done', text: `${e.isAborted ? 'stopped' : 'finished'}${took}`, who: row?.type })
     return ran
@@ -1009,15 +1084,17 @@ export const register: Register = on => {
       })).catch(err =>
         logError($, 'agent tool', err),
       )
-      openOnce($)
     }
     const ran = await next(e)
     try {
       if ((ran as { deny?: unknown }).deny !== undefined) return ran
+      const row = call.agentId ? (await read($, agentsAtom)).find(r => r.id === call.agentId) : undefined
+      // The engine's own forks read and run things too; they are not the chat's work.
+      if (call.agentId && !(row && isKnown(row))) return ran
       await note($, call.tool_use_id, usesOf(call.tool, call))
       const told = storyOf(call.tool, call, ran)
       if (told) {
-        const who = call.agentId ? (await read($, agentsAtom)).find(r => r.id === call.agentId)?.type : undefined
+        const who = row?.type
         await tell($, { at: await $.clock.now(), ...told, ...(who ? { who } : {}) })
       }
       if (await watchPlan($, call, (ran as { result?: unknown }).result)) openOnce($)
@@ -1045,14 +1122,14 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // Presses in the pane: "sec-<id>" folds a section, "c:<name>" shows or hides a connector's calls.
+  // Presses in the pane: "sec-<id>" folds a section, "c:<name>" shows or hides a connector's calls, "ag:<id>" an agent's steps.
   on('ui.press', { plugin: 'whatishappening' }, async ($, e) => {
     const el = e.element
     if (el.startsWith('sec-')) {
       const id = el.slice(4)
       await update($, foldedAtom, cur => (cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]))
-    } else if (el.startsWith('c:')) {
-      const name = el.slice(2)
+    } else if (el.startsWith('c:') || el.startsWith('ag:')) {
+      const name = el.startsWith('c:') ? el.slice(2) : el
       await update($, openAtom, cur => (cur === name ? '' : name))
     } else if (el === 'sess-refresh') {
       await loadSessions($)
@@ -1132,7 +1209,7 @@ export const register: Register = on => {
     const folded = await read($, foldedAtom)
     const openName = await read($, openAtom)
     const usage = await read($, usageAtom)
-    const agents = [...(await read($, agentsAtom))].sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || b.seq - a.seq)
+    const agents = (await read($, agentsAtom)).filter(isKnown).sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || b.seq - a.seq)
 
     const line = (key: string, left: unknown, right?: unknown) => (
       <Box key={key} flexDirection="row" width={inner} height={H1} gap={1}>
@@ -1234,39 +1311,33 @@ export const register: Register = on => {
         </Box>,
       ]
     } else {
-      // The bar has a line of its own: beside the figures it wrapped.
-      const barCols = Math.max(6, Math.min(30, inner))
+      // Compact: one row for the context and one for the two limits (side by side when they fit).
+      const BAR = 10
       const meter = (key: string, label: string, pct: number, tail: string) => {
-        const fill = Math.round((Math.min(100, Math.max(0, pct)) / 100) * barCols)
+        const fill = Math.round((Math.min(100, Math.max(0, pct)) / 100) * BAR)
         return (
-          <Box key={key} flexDirection="column" width={inner} flexShrink={0}>
-            {line(
-              `${key}-figs`,
-              <Text wrap="truncate-end">
-                <Text dimColor>{label.padEnd(6)}</Text>
-                <Text bold>{`${Math.round(pct)}%`}</Text>
-              </Text>,
-              tail ? <Text dimColor>{tail}</Text> : null,
-            )}
-            <Box key={`${key}-bar`} width={inner} height={H1} overflow="hidden">
-              <Text>
-                <Text color={severity(pct)}>{'█'.repeat(fill)}</Text>
-                <Text dimColor>{'░'.repeat(barCols - fill)}</Text>
-              </Text>
-            </Box>
-          </Box>
+          <Text key={key} wrap="truncate-end">
+            <Text dimColor>{`${label.padEnd(4)}`}</Text>
+            <Text color={severity(pct)}>{'█'.repeat(fill)}</Text>
+            <Text dimColor>{'░'.repeat(BAR - fill)}</Text>
+            <Text> </Text>
+            <Text bold>{`${Math.round(pct)}%`}</Text>
+            {tail ? <Text dimColor>{` ${tail}`}</Text> : null}
+          </Text>
         )
       }
       const limit = (key: string, label: string, l: LimitRow | null) =>
-        l && !isOver(l) ? meter(key, label, l.percent, tailOf(l)) : <Text key={key} dimColor>{`${label.padEnd(7)}${l ? `${tailOf(l)}, new reading after the next reply` : 'no reading yet'}`}</Text>
+        l && !isOver(l) ? meter(key, label, l.percent, tailOf(l)) : <Text key={key} dimColor wrap="truncate-end">{`${label.padEnd(4)}${l ? tailOf(l) : 'no reading yet'}`}</Text>
+      const row = (key: string, ...cells: unknown[]) => (
+        <Box key={key} flexDirection="row" width={inner} height={H1} gap={3} overflow="hidden">
+          {cells as never}
+        </Box>
+      )
+      // Each limit takes about 36 columns with its reset time.
+      const limits = [limit('l5', '5h', usage.fiveHour), limit('l7', '7d', usage.sevenDay)]
       usageBody = [
-        limit('l5', '5h', usage.fiveHour),
-        limit('l7', '7d', usage.sevenDay),
-        usage.contextWindow ? meter('ctx', 'Ctx', ctxPct, ctxTail) : null,
-        line('tok', <Text dimColor>Session tokens</Text>, <Text bold>{kTokens(total)}</Text>),
-        <Text key="tok-parts" dimColor wrap="truncate-end">
-          {short(tokenParts, inner)}
-        </Text>,
+        usage.contextWindow ? row('ctx', meter('m', 'ctx', ctxPct, ctxTail)) : null,
+        ...(inner >= 75 ? [row('lim', ...limits)] : limits.map((m, i) => row(`lim${i}`, m))),
       ]
     }
 
@@ -1326,20 +1397,22 @@ export const register: Register = on => {
       : nothing
 
     // ---------- Connectors: one row each, with its latest call ----------
+    const nowMs = await $.clock.now()
     const conns = byNewest(used.connectors)
     const callLine = (c: CallRow) => `${c.what}${c.arg ? ` · ${c.arg}` : ''}`
     const callRows = (name: string, calls: CallRow[]) =>
       [...calls].reverse().slice(0, 10).map((c, i) =>
-        line(`call:${name}:${i}`, <Text wrap="truncate-end">{`  ${callLine(c)}`}</Text>, c.at ? <Text dimColor>{hhmm(c.at)}</Text> : null),
+        line(`call:${name}:${i}`, <Text wrap="truncate-end">{`  ${callLine(c)}`}</Text>, c.at ? <Text dimColor>{whenText(c.at, nowMs)}</Text> : null),
       )
     const connBody = conns.length
       ? capped(
           'conns',
           conns.map(([name, t]) => {
             const latest = t.calls?.[t.calls.length - 1]
+            // When it was last used, where known.
             const count = (
               <Text size="caption" color="claude" tabular>
-                {plural(t.count, 'call')}
+                {`${plural(t.count, 'call')}${latest?.at ? ` · ${whenText(latest.at, nowMs)}` : ''}`}
               </Text>
             )
             return Svg ? (
@@ -1367,6 +1440,20 @@ export const register: Register = on => {
         )
       : nothing
 
+    const MARKS: Record<StoryEvent['kind'], [string, string]> = {
+      read: ['›', 'subtle'],
+      edit: ['✎', 'warning'],
+      run: ['$', 'suggestion'],
+      search: ['⌕', 'subtle'],
+      web: ['◍', 'suggestion'],
+      connector: ['⇄', 'success'],
+      agent: ['◆', 'permission'],
+      'agent-done': ['◇', 'permission'],
+      step: ['✓', 'success'],
+      error: ['✗', 'error'],
+      deny: ['⊘', 'error'],
+      other: ['•', 'subtle'],
+    }
     // ---------- Agents: live ones first, each with its task and its latest action ----------
     const live = agents.filter(a => LIVE.has(a.status)).length
     const mark = (s: string) =>
@@ -1375,13 +1462,8 @@ export const register: Register = on => {
       : s === 'failed' || s === 'killed' ? <Text color="error">✗</Text>
       : <Text color="suggestion">◌</Text>
     // shortcut: a live run time moves when the pane redraws (each call, each 30 s usage read); add a 1 s timer if that is too coarse.
-    const nowMs = await $.clock.now()
     const ranFor = (a: AgentRow) =>
       !a.startedAt ? '' : LIVE.has(a.status) ? runText(nowMs - a.startedAt) : a.endedAt ? runText(a.endedAt - a.startedAt) : ''
-    const facts = (a: AgentRow) =>
-      [a.status === 'running' ? '' : a.status, a.model ? modelName(a.model) : '', plural(a.tools, 'tool'), a.tokens ? `${kTokens(a.tokens)} tokens` : '']
-        .filter(Boolean)
-        .join(' · ')
     // The run time: a live clock where the surface runs one (it ticks without a redraw), else the figure at this redraw.
     const clock = (a: AgentRow) => {
       if (!ranFor(a)) return null
@@ -1395,86 +1477,99 @@ export const register: Register = on => {
         </Text>
       )
     }
-    // One agent as a card `w` columns wide; a narrow card keeps the last two steps and its top three to-dos.
+    // One agent as a card `w` columns wide, in the agent's own color. A live one shows its to-do list or its latest
+    // steps; a finished one folds to one line of figures, its steps a press away (in the terminal).
+    const colors = agentColors(agents.map(a => a.id))
+    const stepMarks = (list: string[], cols: number, liveLast: boolean) => (
+      <Box key="trail" flexDirection="column" width={cols} marginTop={1}>
+        {list.map((step, i) => {
+          const isNow = liveLast && i === list.length - 1
+          const [glyph, tint] = isNow ? ['●', 'claude'] : MARKS[actionMark(step)]
+          return (
+            <Box key={`t${i}`} flexDirection="row" width={cols} height={H1}>
+              <Box width={2} flexShrink={0}>
+                <Text color={tint}>{glyph}</Text>
+              </Box>
+              <Box width={cols - 2} flexShrink={0} height={H1} overflow="hidden">
+                <Text size="caption" mono wrap="truncate-end" color={isNow ? undefined : 'subtle'} bold={isNow}>
+                  {step}
+                </Text>
+              </Box>
+            </Box>
+          )
+        })}
+      </Box>
+    )
     const agentCard = (a: AgentRow, w: number) => {
       const cols = w - 4
       const narrow = w < 40
       const isLive = LIVE.has(a.status)
+      const color = colors.get(a.id) ?? SECTION_COLOR.agents
       const steps = a.plan ?? []
       const stepsDone = steps.filter(st => st.status === 'completed').length
-      const trail = (a.trail?.length ? a.trail : a.doing ? [a.doing] : []).slice(isLive ? (narrow ? -2 : -5) : -1)
+      const trail = a.trail?.length ? a.trail : a.doing ? [a.doing] : []
       const barCols = Math.max(4, cols - 6)
       const fillCols = steps.length ? Math.round((stepsDone / steps.length) * barCols) : 0
+      const isOpen = openName === `ag:${a.id}`
+      const figures = [a.model ? modelName(a.model) : '', plural(a.tools, 'tool'), a.tokens ? `${kTokens(a.tokens)} tokens` : ''].filter(Boolean).join(' · ')
       const progress = steps.length
         ? [
             <Box key="progress" flexDirection="row" width={cols} gap={1} marginTop={1}>
               {Svg ? (
-                <Svg key="bar" source={barSvg(stepsDone / steps.length, ACCENT, px(barCols), 8)} alt={`${stepsDone} of ${steps.length} steps done`} width={px(barCols)} height={8} />
+                <Svg key="bar" source={barSvg(stepsDone / steps.length, color, px(barCols), 8)} alt={`${stepsDone} of ${steps.length} steps done`} width={px(barCols)} height={8} />
               ) : (
                 <Text key="bar">
-                  <Text color="claude">{'█'.repeat(fillCols)}</Text>
+                  <Text color={color}>{'█'.repeat(fillCols)}</Text>
                   <Text dimColor>{'░'.repeat(barCols - fillCols)}</Text>
                 </Text>
               )}
               <Text size="caption" color="subtle" tabular>{`${stepsDone}/${steps.length}`}</Text>
             </Box>,
-            ...steps.slice(0, narrow ? 3 : 8).map((st, i) => stepRow(st, i, cols)),
+            ...(isLive || isOpen ? steps.slice(0, narrow ? 3 : 8).map((st, i) => stepRow(st, i, cols)) : []),
           ]
-        : trail.length
-          ? [
-              <Box key="trail" flexDirection="column" width={cols} marginTop={isLive ? 1 : 0}>
-                {trail.map((step, i) => {
-                  const isNow = isLive && i === trail.length - 1
-                  return (
-                    <Box key={`t${i}`} flexDirection="row" width={cols} height={H1}>
-                      <Box width={2} flexShrink={0}>
-                        {isNow ? <Text color="claude">●</Text> : <Text color="success">✓</Text>}
-                      </Box>
-                      <Box width={cols - 2} flexShrink={0} height={H1} overflow="hidden">
-                        <Text size="caption" mono wrap="truncate-end" color={isNow ? undefined : 'subtle'} bold={isNow}>
-                          {step}
-                        </Text>
-                      </Box>
-                    </Box>
-                  )
-                })}
-              </Box>,
-            ]
-          : [note('trail', isLive ? 'Starting…' : 'No tool calls')]
+        : []
+      const body = isLive
+        ? steps.length
+          ? progress
+          : trail.length
+            ? [stepMarks(trail.slice(narrow ? -2 : -5), cols, true)]
+            : [note('trail', 'Starting…')]
+        : [...progress, isOpen && !steps.length && trail.length ? stepMarks(trail, cols, false) : null]
       return (
-        <Box key={`a:${a.id}`} flexDirection="column" borderStyle="round" borderColor={isLive ? SECTION_COLOR.agents : undefined} borderDimColor={!isLive} paddingX={1} width={w} flexShrink={0}>
+        <Box key={`a:${a.id}`} flexDirection="column" borderStyle="round" borderColor={color} borderDimColor={!isLive} paddingX={1} width={w} flexShrink={0}>
           <Box key="who" flexDirection="row" width={cols} height={H1} gap={1}>
             <Box flexGrow={1} flexShrink={1} height={H1} overflow="hidden">
               <Text wrap="truncate-end">
                 {mark(a.status)}
-                <Text weight="semibold">{` ${a.type}`}</Text>
+                <Text weight="semibold" bold color={color}>{` ${a.type}`}</Text>
               </Text>
             </Box>
             <Box flexShrink={0}>{clock(a) as never}</Box>
           </Box>
           {a.description
             ? wrap(a.description, cols)
-                .slice(0, narrow ? 2 : 1)
+                .slice(0, narrow || !isLive ? 1 : 2)
                 .map((l, i) => (
                   <Text key={`task${i}`} wrap="truncate-end" dimColor={!isLive}>
                     {l}
                   </Text>
                 ))
             : null}
-          {note('facts', facts(a))}
-          {progress as never}
+          {note('facts', isLive ? figures : [a.status === 'completed' ? '' : a.status, figures].filter(Boolean).join(' · '))}
+          {!isLive && a.endedAt ? note('ended', `${a.status === 'completed' ? 'Finished' : 'Ended'} ${whenText(a.endedAt, nowMs)}`) : null}
+          {body as never}
         </Box>
       )
     }
     // More than three agents: one activity lane each on a shared time axis. A bar's height is how many calls the agent
     // made in that slice of time, so a lane shows when each one was busy, idle or done, side by side with the others.
-    const lanes = () => {
-      const t0 = Math.min(...agents.map(a => a.startedAt || nowMs))
+    const lanes = (list: AgentRow[]) => {
+      const t0 = Math.min(...list.map(a => a.startedAt || nowMs))
       const span = Math.max(1000, nowMs - t0)
       const nameCols = Math.min(16, Math.max(8, Math.floor(inner / 4)))
       const laneCols = Math.max(8, inner - 2 - nameCols - 9 - 2)
       const slot = (ms: number) => Math.min(laneCols - 1, Math.max(0, Math.floor(((ms - t0) / span) * laneCols)))
-      const rows = agents.map(a => {
+      const rows = list.map(a => {
         const counts = new Array<number>(laneCols).fill(0)
         for (const b of a.beats ?? []) counts[slot(b)]! += 1
         const from = a.startedAt ? slot(a.startedAt) : 0
@@ -1489,7 +1584,7 @@ export const register: Register = on => {
           .map((n, i) => {
             if (i < r.from || i > r.to) return ''
             const h = n ? Math.max(3, Math.round((n / peak) * 14)) : 1
-            return `<rect x="${(i * cell).toFixed(1)}" y="${16 - h}" width="${Math.max(1, cell - 1).toFixed(1)}" height="${h}" rx="1" fill="${n ? INFO : '#80808060'}"/>`
+            return `<rect x="${(i * cell).toFixed(1)}" y="${16 - h}" width="${Math.max(1, cell - 1).toFixed(1)}" height="${h}" rx="1" fill="${n ? (colors.get(r.a.id) ?? INFO) : '#80808060'}"/>`
           })
           .join('')
         return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${px(laneCols)} 16" width="${px(laneCols)}" height="16">${bars}</svg>`
@@ -1501,7 +1596,7 @@ export const register: Register = on => {
               {mark(r.a.status)}
             </Box>
             <Box width={nameCols} flexShrink={0} overflow="hidden" height={H1}>
-              <Text wrap="truncate-end" weight="medium" dimColor={!LIVE.has(r.a.status)}>
+              <Text wrap="truncate-end" weight="semibold" bold color={colors.get(r.a.id)}>
                 {r.a.description || r.a.type}
               </Text>
             </Box>
@@ -1511,7 +1606,7 @@ export const register: Register = on => {
               ) : (
                 <Text>
                   {r.counts.map((n, i) => (
-                    <Text key={`c${i}`} color={n ? 'suggestion' : undefined} dimColor={!n}>
+                    <Text key={`c${i}`} color={n ? colors.get(r.a.id) : undefined} dimColor={!n}>
                       {i < r.from || i > r.to ? ' ' : n ? level(n) : '·'}
                     </Text>
                   ))}
@@ -1525,17 +1620,61 @@ export const register: Register = on => {
       ]
     }
     const cardsAcross = Math.min(3, Math.max(1, Math.floor((inner + 1) / (MIN_CARD + 1))))
+    // Cards side by side when they fit, else one under the other.
+    const cards = (list: AgentRow[], key: string) =>
+      list.length > 1 && cardsAcross >= list.length
+        ? [
+            <Box key={key} flexDirection="row" width={inner} gap={1}>
+              {list.map(a => agentCard(a, Math.floor((inner - (list.length - 1)) / list.length)))}
+            </Box>,
+          ]
+        : list.map(a => agentCard(a, inner))
+    // A finished agent is one line in its color, however many there are; in the terminal a press opens its card.
+    const doneRow = (a: AgentRow) => {
+      const color = colors.get(a.id) ?? SECTION_COLOR.agents
+      const isOpen = openName === `ag:${a.id}`
+      const name = (
+        <Text wrap="truncate-end">
+          <Text color={a.status === 'completed' ? 'success' : 'error'}>{a.status === 'completed' ? '✓ ' : '✗ '}</Text>
+          <Text bold weight="semibold" color={color}>{a.type}</Text>
+          <Text>{a.description ? `  ${a.description}` : ''}</Text>
+        </Text>
+      )
+      const figs = [ranFor(a), a.tokens ? kTokens(a.tokens) : '', a.endedAt ? whenText(a.endedAt, nowMs) : ''].filter(Boolean).join(' · ')
+      return (
+        <Box key={`done:${a.id}`} flexDirection="column" width={inner} flexShrink={0}>
+          {line(
+            'row',
+            Svg ? name : (
+              <Button key={`ag:${a.id}`} plain onPress={() => undefined}>
+                <Text color={color}>{isOpen ? '▾ ' : '▸ '}</Text>
+                {name}
+              </Button>
+            ),
+            figs ? <Text size="caption" color="subtle" tabular>{figs}</Text> : null,
+          )}
+          {isOpen ? agentCard(a, inner) : null}
+        </Box>
+      )
+    }
+    const atWork = agents.filter(a => LIVE.has(a.status))
+    const finished = agents.filter(a => !LIVE.has(a.status))
+    const group = (key: string, label: string, tint: string, list: AgentRow[], rows: unknown[]) =>
+      list.length
+        ? [
+            <Text key={`g:${key}`} color={tint} bold wrap="truncate-end">{`${label} · ${list.length} ${'─'.repeat(Math.max(0, inner - label.length - String(list.length).length - 4))}`}</Text>,
+            ...rows,
+          ]
+        : []
+    // More than three agents at work: their activity lanes; the finished ones still get their folded cards.
     const agentBody = !agents.length
       ? note('none', 'No agents yet')
-      : agents.length > 3
-        ? lanes()
-        : agents.length > 1 && cardsAcross >= agents.length
-          ? [
-              <Box key="cards" flexDirection="row" width={inner} gap={1}>
-                {agents.map(a => agentCard(a, Math.floor((inner - (agents.length - 1)) / agents.length)))}
-              </Box>,
-            ]
-          : agents.map(a => agentCard(a, inner))
+      : [
+          ...group('run', 'Running', 'claude', atWork, atWork.length > 3 ? lanes(atWork) : cards(atWork, 'run-cards')),
+          ...group('done', 'Finished', 'success', finished, capped('done', finished.map(doneRow))),
+        ]
+    const agentTokens = agents.reduce((n, a) => n + (a.tokens ?? 0), 0)
+    const agentSummary = [`${live} running`, `${agents.length - live} done`, agentTokens ? `${kTokens(agentTokens)} tokens` : ''].filter(Boolean).join(' · ')
 
     // ---------- Skills ----------
     const skills = byNewest(used.skills)
@@ -1559,20 +1698,6 @@ export const register: Register = on => {
 
     // ---------- Timeline: earlier prompts as one line each, the latest one told event by event ----------
     const story = await read($, storyAtom)
-    const MARKS: Record<StoryEvent['kind'], [string, string]> = {
-      read: ['›', 'subtle'],
-      edit: ['✎', 'warning'],
-      run: ['$', 'suggestion'],
-      search: ['⌕', 'subtle'],
-      web: ['◍', 'suggestion'],
-      connector: ['⇄', 'success'],
-      agent: ['◆', 'permission'],
-      'agent-done': ['◇', 'permission'],
-      step: ['✓', 'success'],
-      error: ['✗', 'error'],
-      deny: ['⊘', 'error'],
-      other: ['•', 'subtle'],
-    }
     const latest = story[story.length - 1]
     const earlier = story.slice(0, -1).slice(-4)
     const recap = (tu: StoryTurn) => {
@@ -1606,15 +1731,32 @@ export const register: Register = on => {
           {groups.length
             ? groups.map((g, i) => {
                 const [glyph, tint] = MARKS[g.kind]
+                const bad = g.kind === 'error' || g.kind === 'deny'
+                // Columns: when, a mark, who did it (Claude or the agent's type), then what happened.
+                const whoCols = inner >= 40 ? 11 : 0
+                const textCols = inner - 9 - 2 - whoCols
+                const who = g.who ?? 'Claude'
                 return (
                   <Box key={`ev${i}`} flexDirection="row" width={inner} height={H1}>
+                    <Box width={9} flexShrink={0}>
+                      <Text color="subtle" tabular>
+                        {hhmmss(g.at)}
+                      </Text>
+                    </Box>
                     <Box width={2} flexShrink={0}>
                       <Text color={tint}>{glyph}</Text>
                     </Box>
-                    <Box width={inner - 2} flexShrink={0} height={H1} overflow="hidden">
-                      <Text size="caption" wrap="truncate-end" color={g.kind === 'error' || g.kind === 'deny' ? 'error' : undefined}>
+                    {whoCols ? (
+                      <Box width={whoCols} flexShrink={0} height={H1} overflow="hidden">
+                        <Text weight="semibold" bold color={bad ? 'error' : g.who ? 'permission' : 'claude'} wrap="truncate-end">
+                          {who.length > whoCols - 1 ? `${who.slice(0, whoCols - 2)}…` : who}
+                        </Text>
+                      </Box>
+                    ) : null}
+                    <Box width={textCols} flexShrink={0} height={H1} overflow="hidden">
+                      <Text size="caption" wrap="truncate-end" color={bad ? 'error' : undefined}>
                         {storyLine(g)}
-                        {g.who ? <Text color="subtle">{`  · ${g.who}`}</Text> : null}
+                        {g.who && !whoCols ? <Text color="subtle">{`  · ${g.who}`}</Text> : null}
                       </Text>
                     </Box>
                   </Box>
@@ -1689,7 +1831,7 @@ export const register: Register = on => {
         {plan.steps.length ? block('todo', 'To-do', `${done}/${plan.steps.length} · ${pctDone}%`, todoBody, done < plan.steps.length) : null}
         {files.length ? block('files', 'Context files', plural(files.length, 'file'), fileBody) : null}
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
-        {agents.length ? block('agents', 'Agents', `${live} running · ${agents.length - live} done`, agentBody, live > 0) : null}
+        {agents.length ? block('agents', 'Agents', agentSummary, agentBody, live > 0) : null}
         {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
         {story.length ? block('timeline', 'Timeline', latest && !latest.endedAt ? 'live' : plural(story.length, 'prompt'), timelineBody, Boolean(latest && !latest.endedAt)) : null}
       </Box>
