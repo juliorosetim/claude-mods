@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, cleanLog, endedTaskId, startedTaskId, logEventOf, noticeOf, plainWords, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
+import { actionMark, agentColors, cellZone, segmentWidths, callTimes, folderLabel, whenText, cleanLog, endedTaskId, startedTaskId, logEventOf, noticeOf, replyText, mdLines, modelName, promptLabel, serverLabel, sessionGroups, storyLine, storyOf, tokenTotals, USAGE_SED } from './register'
 
 type On = Parameters<NonNullable<Parameters<typeof test>[2]>>[1]
 type Call = (input: Record<string, unknown>) => Promise<{ result?: unknown; context?: string[] }>
@@ -185,7 +185,13 @@ test('the clean log: what Claude said, each run of calls as one line of counts, 
     'step|Step done: Ship it',
     'error|Failed: Bash npm test',
   ])
-  expect(plainWords('## Done\n\nThe **docker deploy** of `RC2` is up.\n```sh\nls\n```')).toBe('Done The docker deploy of RC2 is up.')
+  expect(replyText('## Done\n\n\n\nThe deploy is up.  \n```sh\nls\n```')).toBe('## Done\n\nThe deploy is up.')
+  expect(mdLines('## Done\n\n- **Fixed:** the `RC2` [deploy](https://x)\n  2. next')).toEqual([
+    { lead: '', heading: true, parts: [{ text: 'Done', style: 'plain' }] },
+    null,
+    { lead: '• ', heading: false, parts: [{ text: 'Fixed:', style: 'bold' }, { text: ' the ', style: 'plain' }, { text: 'RC2', style: 'code' }, { text: ' ', style: 'plain' }, { text: 'deploy', style: 'link' }] },
+    { lead: '  2. ', heading: false, parts: [{ text: 'next', style: 'plain' }] },
+  ])
   expect(noticeOf('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command "Wait" completed (exit code 0)</summary>\n</task-notification>')).toBe('Background command "Wait" completed (exit code 0)')
   expect(noticeOf('fix the parser')).toBeNull()
   const skipped = '<task-notification>\nwhatishappening: its session.append hook was skipped.\n</task-notification>'
@@ -593,6 +599,21 @@ for (const surface of SURFACES) {
     expect(filled, 'nothing typed for it').toHaveLength(1)
   })
 
+  test(`a folder's older sessions open with a press and close again (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const out = Array.from({ length: 10 }, (_, i) => `${1700000900 - i}.0\t./-home-dev-project/${SID(i + 1)}.jsonl\t"cwd":"/home/dev/project"\t"aiTitle":"Job ${i + 1}"\t`).join('\n')
+    const clock = world(on, { run: argv => (argv[0] === 'sh' && argv[2]?.includes('aiTitle') ? out : '') })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    await $.command.run({ command: 'sessions', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening-sessions', props: PANE })
+    expect(await ui.find({ text: /Job 10$/ }), 'past the first eight').toBeUndefined()
+    await ui.press({ key: 'more:/home/dev/project' })
+    expect(await ui.find({ text: /Job 10$/ }), 'every session of the folder').toBeDefined()
+    expect(await ui.find({ text: /Show fewer/ }), 'and a way back').toBeDefined()
+    await ui.press({ key: 'more:/home/dev/project' })
+    expect(await ui.find({ text: /\+2 older/ }), 'folded again').toBeDefined()
+  })
+
   test(`the timeline tells the latest prompt as a clean log and earlier ones in one line (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
     const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
     const clock = world(on, { history: () => msgs })
@@ -629,7 +650,7 @@ for (const surface of SURFACES) {
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ type: 'Text', text: /^Timeline$/ }), 'the section').toBeDefined()
-    expect(await ui.find({ text: /^The parser is fixed\.$/ }), "Claude's words, without the markdown").toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^parser$/ }), "Claude's bold, drawn bold").toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^Background command "Wait" completed \(exit code 0\)$/ }), 'the background report, once').toHaveLength(1)
     expect(await ui.find({ text: /^also check the screen$/ }), 'a prompt typed while Claude answered').toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^Checking the branch first\.$/ }), 'the first reply, once').toHaveLength(1)

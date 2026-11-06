@@ -101,7 +101,7 @@ What happened, prompt by prompt, at the bottom of the pane, as a clean log rathe
 14:03:40 ✓  Step done: Fix the parser
 ```
 
-- **The latest prompt:** what Claude wrote to you between its calls, the prompts you typed while it answered (❯), the reports of background commands, the steps done, the agents it started and finished, and the failures, each with its time to the second.
+- **The latest prompt:** what Claude wrote to you between its calls, formatted as in the chat (lists, bold, code, headings), the prompts you typed while it answered (❯), the reports of background commands, the steps done, the agents it started and finished, and the failures, each with its time to the second.
 - **The calls in between:** one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card in Agents.
 - **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
 - **Marks:** ● what Claude said (green: a background report), ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked.
@@ -111,6 +111,7 @@ What happened, prompt by prompt, at the bottom of the pane, as a clean log rathe
 
 - **A session of this folder:** press it, and `/resume <id>` lands in the prompt box. Press Enter to pick it up.
 - **A session of another folder:** `/resume` only finds the sessions of the folder Claude Code started in, so the pane shows the command to run in a terminal instead: `cd <folder> && claude --resume <id>`.
+- **+N older** under a folder lists all of its sessions; **Show fewer** folds them again. The pane reads your latest 150 sessions.
 - **↻** reads the list again.
 
 ## Install

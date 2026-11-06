@@ -167,6 +167,8 @@ declare module 'claude-code' {
       sessions: SessionList
       /** The session from another folder whose resume command is shown; '' for none. */
       shown: string
+      /** The folders whose every session the Sessions pane lists. */
+      expanded: string[]
     }
   }
 }

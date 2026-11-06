@@ -91,6 +91,8 @@ const NO_SESSIONS: SessionList = { groups: [], at: 0 }
 const sessionsAtom = atom({ plugin: 'whatishappening', key: 'sessions' } as const, NO_SESSIONS)
 // The session whose resume command is shown (one from another folder); '' for none.
 const shownAtom = atom({ plugin: 'whatishappening', key: 'shown' } as const, '')
+// The folders whose every session the Sessions pane lists, not only the latest few.
+const expandedAtom = atom({ plugin: 'whatishappening', key: 'expanded' } as const, [] as string[])
 const SESSIONS_PANE = 'whatishappening-sessions'
 // The timeline: one entry per prompt, each with what happened during it.
 const storyAtom = atom({ plugin: 'whatishappening', key: 'story' } as const, [] as StoryTurn[])
@@ -99,7 +101,8 @@ const backgroundAtom = atom({ plugin: 'whatishappening', key: 'background' } as 
 // shortcut: a task whose report never came (Claude Code restarted) drops after a day; read the engine's list if it offers one.
 const BACKGROUND_TTL = 24 * 3600_000
 const STORY_EVENTS = 80
-const MAX_SESSIONS = 60
+// shortcut: ~2 s to read 150 transcripts on open; read one folder's older sessions on demand if that grows slow.
+const MAX_SESSIONS = 150
 const PER_FOLDER = 8
 
 // Module variables start over on a reload; what must last lives in $.state.
@@ -895,8 +898,8 @@ export function noticeOf(text: string): string | null {
 /** A message of the chat as a clean-log event: Claude's words, a prompt the person typed, a background command's report. */
 export function logEventOf(role: string, words: string): { kind: 'say' | 'prompt' | 'notice'; text: string } | null {
   if (role === 'assistant') {
-    const said = plainWords(words)
-    return said ? { kind: 'say', text: short(said, 600) } : null
+    const said = replyText(words)
+    return said ? { kind: 'say', text: said } : null
   }
   // Only a report with a summary: the engine's own notices to Claude come as task notifications too.
   const notice = noticeOf(words)
@@ -934,14 +937,41 @@ async function catchUp($: EngineInterface) {
   }
 }
 
-/** Claude's markdown as plain words on one line: no stars, ticks or heading marks. */
-export function plainWords(md: string): string {
-  return md
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/^#+\s*/gm, '')
-    .replace(/\*\*|__|`/g, '')
-    .replace(/\s+/g, ' ')
+/** Claude's reply as the log keeps it: its markdown, without code blocks and runs of blank lines, cut at a line
+ *  once past 1500 characters. */
+export function replyText(md: string): string {
+  const kept = md
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim()
+  if (kept.length <= 1500) return kept
+  const cut = kept.lastIndexOf('\n', 1500)
+  return `${kept.slice(0, cut > 500 ? cut : 1500).trimEnd()} …`
+}
+
+export type MdPart = { text: string; style: 'plain' | 'bold' | 'code' | 'link' }
+export type MdLine = { lead: string; parts: MdPart[]; heading: boolean } | null
+
+/** A reply's lines as the Timeline draws them: null for a blank line, else its lead (a bullet, a number, an indent)
+ *  and its words, with **bold**, `code` and [links](url) told apart. */
+export function mdLines(md: string): MdLine[] {
+  return md.split('\n').map(raw => {
+    if (!raw.trim()) return null
+    const heading = /^#{1,6}\s+/.test(raw)
+    const item = /^(\s*)(?:[-*+]|(\d+)[.)])\s+(.*)$/.exec(raw)
+    const lead = item ? `${' '.repeat(Math.min(item[1]!.length, 6))}${item[2] ? `${item[2]}.` : '•'} ` : ''
+    const body = item ? item[3]! : raw.replace(/^#{1,6}\s+/, '').replace(/^>\s?/, '')
+    const parts: MdPart[] = []
+    for (const bit of body.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/)) {
+      if (!bit) continue
+      if (/^\*\*[^*]+\*\*$/.test(bit)) parts.push({ text: bit.slice(2, -2), style: 'bold' })
+      else if (/^`[^`]+`$/.test(bit)) parts.push({ text: bit.slice(1, -1), style: 'code' })
+      else if (/^\[[^\]]+\]\([^)]+\)$/.test(bit)) parts.push({ text: bit.slice(1, bit.indexOf(']')), style: 'link' })
+      else parts.push({ text: bit, style: 'plain' })
+    }
+    return { lead, parts, heading }
+  })
 }
 
 /** A step, a failure or a block in words: "Step done: Ship it". */
@@ -1320,6 +1350,9 @@ export const register: Register = on => {
       await update($, openAtom, cur => (cur === name ? '' : name))
     } else if (el === 'sess-refresh') {
       await loadSessions($)
+    } else if (el.startsWith('more:')) {
+      const dir = el.slice(5)
+      await update($, expandedAtom, cur => (cur.includes(dir) ? cur.filter(x => x !== dir) : [...cur, dir]))
     } else if (el.startsWith('sess:')) {
       await pickSession($, el.slice(5))
     }
@@ -1956,9 +1989,9 @@ export const register: Register = on => {
                 const [glyph, tint] = g.kind === 'tools' ? [' ', 'subtle'] : MARKS[g.kind]
                 const bad = g.kind === 'error' || g.kind === 'deny'
                 const said = g.kind === 'say' || g.kind === 'notice' || g.kind === 'prompt'
-                // Columns: when, a mark, then what happened. Claude's words wrap, up to four lines; the rest is one line.
+                // Columns: when, a mark, then what happened. Claude's words keep their markdown; the rest is one line.
                 const textCols = inner - 9 - 2
-                const words = said && g.text.length > textCols * 4 ? `${g.text.slice(0, textCols * 4 - 1)}…` : g.text
+                const reply = g.kind === 'say' ? mdLines(g.text) : null
                 return (
                   <Box key={`ev${i}`} flexDirection="row" width={inner} {...(said ? {} : { height: H1 })}>
                     <Box width={9} flexShrink={0}>
@@ -1969,11 +2002,44 @@ export const register: Register = on => {
                     <Box width={2} flexShrink={0}>
                       <Text color={tint || undefined}>{glyph}</Text>
                     </Box>
-                    <Box width={textCols} flexShrink={0} {...(said ? {} : { height: H1, overflow: 'hidden' as const })}>
-                      <Text size="caption" wrap={said ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
-                        {words}
-                      </Text>
-                    </Box>
+                    {reply ? (
+                      <Box width={textCols} flexShrink={0} flexDirection="column">
+                        {reply.map((ln, j) =>
+                          ln === null ? (
+                            <Text key={`l${j}`}> </Text>
+                          ) : (
+                            <Box key={`l${j}`} flexDirection="row" width={textCols}>
+                              {ln.lead ? (
+                                <Box width={ln.lead.length} flexShrink={0}>
+                                  <Text color="subtle">{ln.lead}</Text>
+                                </Box>
+                              ) : null}
+                              <Box width={textCols - ln.lead.length} flexShrink={0}>
+                                <Text size="caption" wrap="wrap" bold={ln.heading} weight={ln.heading ? 'semibold' : undefined}>
+                                  {ln.parts.map((pt, k) =>
+                                    pt.style === 'bold' ? (
+                                      <Text key={k} bold weight="semibold">{pt.text}</Text>
+                                    ) : pt.style === 'code' ? (
+                                      <Text key={k} color="permission" mono>{pt.text}</Text>
+                                    ) : pt.style === 'link' ? (
+                                      <Text key={k} color="suggestion" underline>{pt.text}</Text>
+                                    ) : (
+                                      pt.text
+                                    ),
+                                  )}
+                                </Text>
+                              </Box>
+                            </Box>
+                          ),
+                        )}
+                      </Box>
+                    ) : (
+                      <Box width={textCols} flexShrink={0} {...(said ? {} : { height: H1, overflow: 'hidden' as const })}>
+                        <Text size="caption" wrap={said ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
+                          {g.text}
+                        </Text>
+                      </Box>
+                    )}
                   </Box>
                 )
               })
@@ -2075,6 +2141,7 @@ export const register: Register = on => {
     const H1 = e.surface === 'terminal' ? 1 : undefined
     const list = await read($, sessionsAtom)
     const shown = await read($, shownAtom)
+    const expanded = await read($, expandedAtom)
     const cwd = await $.session.cwd()
     const self = await $.session.id()
     const now = list.at || (await $.clock.now())
@@ -2084,8 +2151,9 @@ export const register: Register = on => {
     const body = groups.length
       ? groups.map(g => {
           const here = g.cwd === cwd
-          const items = g.items.slice(0, PER_FOLDER)
-          const more = g.items.length - items.length
+          const isOpen = expanded.includes(g.cwd)
+          const items = isOpen ? g.items : g.items.slice(0, PER_FOLDER)
+          const more = g.items.length - PER_FOLDER
           return (
             <Box key={`g:${g.cwd}`} flexDirection="column" borderStyle="round" borderColor={here ? 'claude' : undefined} borderDimColor={!here} paddingX={1} width={width} flexShrink={0}>
               <Box key="head" flexDirection="row" justifyContent="space-between" width={inner}>
@@ -2133,9 +2201,9 @@ export const register: Register = on => {
                 )
               })}
               {more > 0 ? (
-                <Text key="more" size="caption" color="subtle">
-                  {`+${more} older`}
-                </Text>
+                <Button key={`more:${g.cwd}`} plain dimColor onPress={() => undefined}>
+                  {isOpen ? '▴ Show fewer' : `▾ +${more} older`}
+                </Button>
               ) : null}
             </Box>
           )

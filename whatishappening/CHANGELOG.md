@@ -4,6 +4,12 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-06
+
+- Timeline: Claude's replies keep their formatting, as in the chat: paragraphs, bullet and numbered lists with their indent, **bold**, `code` in color, links and headings. A reply shows whole up to 1500 characters, then cut at a line; code blocks are left out.
+
+- Sessions: `+12 older` under a folder is a button that lists every session of that folder; `Show fewer` folds them again. The pane reads the latest 150 sessions, up from 60.
+
 ## 0.8.0 - 2026-11-06
 
 - **Background section:** the commands Claude left running in the background (`$ Wait for the pipeline   ◐ 4m 12s`), each with its clock, from the moment it starts until its report comes or Claude stops it. The NOW line counts them too: `Waiting on 2 background commands`, or `2 in background` beside the step Claude is on.
