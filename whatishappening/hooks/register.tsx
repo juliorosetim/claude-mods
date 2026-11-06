@@ -51,6 +51,8 @@ const NUDGE_CONT = `Reminder from What is happening: the to-do list is from an e
 const NUDGE_STALE = `Reminder from What is happening: the to-do list has not moved for a while. If a step is done, send the whole list to ${OWN_PLAN_TOOL} again.`
 // Where the clean log's last look at the history ended; null until the first look after a load.
 let seen: { count: number; lastKey: string } | null = null
+let catching: Promise<void> | null = null
+let logTimer: unknown = null
 let turnCalls = 0
 let turnPlanned = false
 let nudged = false
@@ -84,6 +86,8 @@ const NO_PLAN: Plan = { title: '', steps: [], updatedAt: 0 }
 const planAtom = atom({ plugin: 'whatishappening', key: 'plan' } as const, NO_PLAN)
 const openAtom = atom({ plugin: 'whatishappening', key: 'open' } as const, '')
 const foldedAtom = atom({ plugin: 'whatishappening', key: 'folded' } as const, [] as string[])
+// The whole Timeline, not only the latest lines that fit under the other sections.
+const wholeLogAtom = atom({ plugin: 'whatishappening', key: 'wholeLog' } as const, false)
 const agentsAtom = atom({ plugin: 'whatishappening', key: 'agents' } as const, [] as AgentRow[])
 const NO_USAGE: UsageView = { fiveHour: null, sevenDay: null, contextTokens: 0, contextWindow: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, at: 0 }
 const usageAtom = atom({ plugin: 'whatishappening', key: 'usage' } as const, NO_USAGE)
@@ -631,7 +635,7 @@ async function recount($: EngineInterface) {
 
   const main = await $.session.messages()
   const all: SessionMessage[] = [...main]
-  if (!seen) await catchUp($)
+  if (!seen) await catchUpOnce($)
   for (const m of main) {
     for (const u of m.toolUses) {
       if (!u.agentId) continue
@@ -910,6 +914,14 @@ export function logEventOf(role: string, words: string): { kind: 'say' | 'prompt
 
 /** The chat's messages since the last look, told in the clean log. Read from the history rather than hooked as they are
  *  kept: under a Team or Enterprise login Claude Code's own guard skips a user's mod on that event. */
+/** One look at a time: the timer and a call may ask together, and two looks would tell a reply twice. */
+function catchUpOnce($: EngineInterface): Promise<void> {
+  catching ??= catchUp($).finally(() => {
+    catching = null
+  })
+  return catching
+}
+
 async function catchUp($: EngineInterface) {
   // shortcut: reads the whole history (up to 4096 messages) per main-chat call; fine at chat pace, a cursor if the engine offers one.
   const all = await $.session.messages()
@@ -1015,7 +1027,9 @@ const SESSIONS_SH = [
   `find . -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@\\t%p\\n' | sort -rn | head -n ${MAX_SESSIONS} |`,
   'while IFS="$(printf \'\\t\')" read -r t f; do',
   '  c=$(grep -m1 -o \'"cwd":"[^"]*"\' "$f")',
-  '  n=$(grep -o \'"\\(aiTitle\\|customTitle\\)":"[^"]*"\' "$f" | tail -n 1)',
+  // The name the person gave with /rename wins: Claude Code writes its own title again after it, in pairs.
+  '  n=$(grep -o \'"customTitle":"[^"]*"\' "$f" | tail -n 1)',
+  '  [ -n "$n" ] || n=$(grep -o \'"aiTitle":"[^"]*"\' "$f" | tail -n 1)',
   // With no title yet, the first prompt the person typed (one that opens with "<" is a command's record).
   '  u=$(grep -m1 -o \'"role":"user","content":"[^"<][^"]*"\' "$f" | cut -c1-300 | sed \'s/^"role":"user",//\')',
   '  printf \'%s\\t%s\\t%s\\t%s\\t%s\\n\' "$t" "$f" "$c" "$n" "$u"',
@@ -1140,6 +1154,13 @@ export const register: Register = on => {
     if (!syncTimer) syncTimer = $.clock.every(3000, () => void syncAgents($))
     // Every 30 s: limits move, the countdowns tick and the tokens are read again, so a long first turn shows them too.
     if (!usageTimer) usageTimer = $.clock.every(30000, () => void refreshUsage($, true))
+    // A call starts before its reply is kept in the history, so a long call held the reply back from the log until
+    // the next one: look again every few seconds while an answer runs.
+    if (!logTimer)
+      logTimer = $.clock.every(3000, async () => {
+        const latest = (await read($, storyAtom)).at(-1)
+        if (latest && !latest.endedAt) await catchUpOnce($).catch(err => logError($, 'clean log', err))
+      })
     void refreshUsage($, true)
     // The skill names first: the recount needs them to tell a typed skill from another slash command.
     void loadStart($)
@@ -1253,7 +1274,9 @@ export const register: Register = on => {
     const ran = await next(e)
     if (!e.agentId) {
       void refreshUsage($, true)
-      await catchUp($).catch(err => logError($, 'clean log', err))
+      // A look already under way may predate the final reply: let it end, then look once more.
+      await catching?.catch(() => undefined)
+      await catchUpOnce($).catch(err => logError($, 'clean log', err))
       const now = await $.clock.now()
       await update($, storyAtom, turns => (turns.length ? [...turns.slice(0, -1), { ...turns[turns.length - 1]!, endedAt: now }] : turns))
       return ran
@@ -1294,7 +1317,7 @@ export const register: Register = on => {
       )
     }
     // Claude's words before this call go in the log ahead of it.
-    if (!call.agentId) await catchUp($).catch(err => logError($, 'clean log', err))
+    if (!call.agentId) await catchUpOnce($).catch(err => logError($, 'clean log', err))
     const ran = await next(e)
     try {
       if ((ran as { deny?: unknown }).deny !== undefined) return ran
@@ -1348,6 +1371,8 @@ export const register: Register = on => {
     } else if (el.startsWith('c:') || el.startsWith('ag:')) {
       const name = el.startsWith('c:') ? el.slice(2) : el
       await update($, openAtom, cur => (cur === name ? '' : name))
+    } else if (el === 'tl-all') {
+      await update($, wholeLogAtom, cur => !cur)
     } else if (el === 'sess-refresh') {
       await loadSessions($)
     } else if (el.startsWith('more:')) {
@@ -1431,6 +1456,11 @@ export const register: Register = on => {
     const used = await read($, usedAtom)
     const plan = await read($, planAtom)
     const folded = await read($, foldedAtom)
+    // In the terminal the pane is as tall as its body, and the Timeline takes the rows the other sections leave,
+    // its latest lines at the bottom: the sections above stay in sight with no scrolling.
+    const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows ?? 0
+    const wholeLog = await read($, wholeLogAtom)
+    const follow = !Svg && bodyRows > 0 && !wholeLog && !folded.includes('timeline')
     const openName = await read($, openAtom)
     const usage = await read($, usageAtom)
     const agents = (await read($, agentsAtom)).filter(isKnown).sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || b.seq - a.seq)
@@ -1478,7 +1508,7 @@ export const register: Register = on => {
         </Box>
       )
       return (
-        <Box key={id} flexDirection="column" borderStyle="round" borderColor={tint} borderDimColor={!isActive} paddingX={1} paddingY={Svg ? 1 : 0} width={width} flexShrink={0}>
+        <Box key={id} flexDirection="column" borderStyle="round" borderColor={tint} borderDimColor={!isActive} paddingX={1} paddingY={Svg ? 1 : 0} width={width} {...(id === 'timeline' && follow && !shut ? { flexShrink: 1, minHeight: 8, overflow: 'hidden' as const } : { flexShrink: 0 })}>
           {head}
           {shut ? null : (body as never)}
         </Box>
@@ -1964,7 +1994,8 @@ export const register: Register = on => {
         .filter(Boolean)
         .join(' · ')
     }
-    const log = latest ? cleanLog(latest.events).slice(-14) : []
+    const log = latest ? cleanLog(latest.events) : []
+    const lastSay = log.map(g => g.kind).lastIndexOf('say')
     const timelineBody = [
       ...earlier.map(tu => (
         <Box key={`tu:${tu.id}`} flexDirection="column" width={inner} flexShrink={0}>
@@ -1976,7 +2007,7 @@ export const register: Register = on => {
         </Box>
       )),
       latest ? (
-        <Box key="latest" flexDirection="column" width={inner} marginTop={earlier.length ? 1 : 0}>
+        <Box key="latest" flexDirection="column" width={inner} marginTop={earlier.length ? 1 : 0} flexShrink={0}>
           {/* The prompt alone on its line: a long one pushed a right-hand note onto a line of its own off the terminal.
               "live" already sits in the section's header. */}
           <Text key="latest-head" wrap="truncate-end">
@@ -1991,9 +2022,13 @@ export const register: Register = on => {
                 const said = g.kind === 'say' || g.kind === 'notice' || g.kind === 'prompt'
                 // Columns: when, a mark, then what happened. Claude's words keep their markdown; the rest is one line.
                 const textCols = inner - 9 - 2
-                const reply = g.kind === 'say' ? mdLines(g.text) : null
+                // The latest reply in full; the earlier ones by their first line, so they leave room for it.
+                const reply = g.kind === 'say' && i === lastSay ? mdLines(g.text) : null
+                const firstLine = g.kind === 'say' && !reply ? (mdLines(g.text).find(Boolean)?.parts.map(pt => pt.text).join('') ?? '') : ''
+                const shown = firstLine ? `${firstLine}${g.text.trim().includes('\n') ? ' …' : ''}` : g.text
+                const wraps = said && !firstLine
                 return (
-                  <Box key={`ev${i}`} flexDirection="row" width={inner} {...(said ? {} : { height: H1 })}>
+                  <Box key={`ev${i}`} flexDirection="row" width={inner} {...(wraps || reply ? {} : { height: H1 })}>
                     <Box width={9} flexShrink={0}>
                       <Text color="subtle" tabular>
                         {g.kind === 'tools' ? '' : hhmmss(g.at)}
@@ -2034,9 +2069,9 @@ export const register: Register = on => {
                         )}
                       </Box>
                     ) : (
-                      <Box width={textCols} flexShrink={0} {...(said ? {} : { height: H1, overflow: 'hidden' as const })}>
-                        <Text size="caption" wrap={said ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
-                          {g.text}
+                      <Box width={textCols} flexShrink={0} {...(wraps ? {} : { height: H1, overflow: 'hidden' as const })}>
+                        <Text size="caption" wrap={wraps ? 'wrap' : 'truncate-end'} color={bad ? 'error' : g.kind === 'tools' ? 'subtle' : undefined}>
+                          {shown}
                         </Text>
                       </Box>
                     )}
@@ -2047,6 +2082,25 @@ export const register: Register = on => {
         </Box>
       ) : null,
     ]
+
+    // In the terminal: a press shows the whole log or goes back to its latest lines; following, what does not fit
+    // leaves by the top, so the latest line stays at the bottom.
+    const timelineShown = Svg
+      ? timelineBody
+      : [
+          <Button key="tl-all" plain dimColor onPress={() => undefined}>
+            {wholeLog ? '↓ Follow the latest' : '↑ Show the whole log'}
+          </Button>,
+          follow ? (
+            <Box key="tail" flexDirection="column" width={inner} flexGrow={1} flexShrink={1} overflow="hidden" justifyContent="flex-end">
+              {timelineBody as never}
+            </Box>
+          ) : (
+            <Box key="tail" flexDirection="column" width={inner} flexShrink={0}>
+              {timelineBody as never}
+            </Box>
+          ),
+        ]
 
     // The line on top: what the chat is doing right now, in one glance.
     const running = agents.filter(a => a.status === 'running').length
@@ -2079,7 +2133,7 @@ export const register: Register = on => {
     const limits = [usage.fiveHour ? `5h ${pctOf(usage.fiveHour)}%` : '', usage.sevenDay ? `7d ${pctOf(usage.sevenDay)}%` : ''].filter(Boolean).join(' · ')
 
     return (
-      <Box flexDirection="column" width={width} gap={Svg ? 1 : 0}>
+      <Box flexDirection="column" width={width} gap={Svg ? 1 : 0} {...(follow && story.length ? { height: bodyRows } : {})}>
         {Svg ? (
           <Box key="now" flexDirection="column" width={width} paddingX={1}>
             <Box key="now-top" flexDirection="row" justifyContent="space-between" width={width - 2}>
@@ -2101,7 +2155,7 @@ export const register: Register = on => {
               ))}
           </Box>
         ) : (
-          <Box key="now" flexDirection="row" width={width} paddingX={1} gap={1} height={1}>
+          <Box key="now" flexDirection="row" width={width} paddingX={1} gap={1} height={1} flexShrink={0}>
             <Box flexShrink={0}>
               <Text color={isWorking ? 'claude' : 'subtle'} weight="semibold">
                 {isWorking ? '▶ NOW' : '■ IDLE'}
@@ -2129,7 +2183,7 @@ export const register: Register = on => {
         {conns.length ? block('connectors', 'Connectors', `${conns.length} · ${plural(totalCalls, 'call')}`, connBody) : null}
         {agents.length ? block('agents', 'Agents', agentSummary, agentBody, live > 0) : null}
         {skills.length ? block('skills', 'Skills', plural(skills.length, 'skill'), skillBody) : null}
-        {story.length ? block('timeline', 'Timeline', latest && !latest.endedAt ? 'live' : plural(story.length, 'prompt'), timelineBody, Boolean(latest && !latest.endedAt)) : null}
+        {story.length ? block('timeline', 'Timeline', latest && !latest.endedAt ? 'live' : plural(story.length, 'prompt'), timelineShown, Boolean(latest && !latest.endedAt)) : null}
       </Box>
     )
   })

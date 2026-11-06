@@ -650,7 +650,7 @@ for (const surface of SURFACES) {
     await clock.settle()
     const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
     expect(await ui.find({ type: 'Text', text: /^Timeline$/ }), 'the section').toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^parser$/ }), "Claude's bold, drawn bold").toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^The parser is fixed\.$/ }), 'an earlier reply: its first line, plain').toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^Background command "Wait" completed \(exit code 0\)$/ }), 'the background report, once').toHaveLength(1)
     expect(await ui.find({ text: /^also check the screen$/ }), 'a prompt typed while Claude answered').toBeDefined()
     expect(await ui.findAll({ type: 'Text', text: /^Checking the branch first\.$/ }), 'the first reply, once').toHaveLength(1)
@@ -662,6 +662,39 @@ for (const surface of SURFACES) {
     expect((await ui.findAll({ text: /^live$/ })).length, "still running, said once, in the section's header").toBe(1)
     expect(await ui.find({ text: /^Read 3 files · edited 1 file$/ }), 'the calls, one line of counts').toBeDefined()
     expect(await ui.find({ text: /^Check the tests$/ }), 'the agent it started').toBeDefined()
+  })
+
+  test(`a reply kept while a long call runs reaches the log within seconds (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
+    const clock = world(on, { history: async () => msgs })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    await ($.turn.start as unknown as (i: Record<string, unknown>) => Promise<unknown>)({ text: 'run the tests', turnId: 't1' })
+    await ($.tool.call as unknown as Call)({ tool: 'Read', tool_use_id: 'r1', file_path: '/home/dev/project/a.ts' })
+    msgs.push({ role: 'assistant', text: '13 tests pass. Now the script.', toolUses: [] })
+    await clock.advance(3500)
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: PANE })
+    expect(await ui.find({ type: 'Text', text: /^13 tests pass\. Now the script\.$/ }), 'told with no call after it').toBeDefined()
+  })
+
+  test(`the latest reply in full and formatted; in a terminal the Timeline follows its end under the other sections (${surface})`, { timeoutMs: 30000 }, async ($, on) => {
+    const msgs: { role: string; text: string; toolUses: unknown[] }[] = []
+    const clock = world(on, { history: async () => msgs })
+    await $.session.start({ ...START, surface } as never)
+    await clock.settle()
+    await ($.turn.start as unknown as (i: Record<string, unknown>) => Promise<unknown>)({ text: 'ship it', turnId: 't1' })
+    msgs.push({ role: 'assistant', text: 'First look.\nMore lines.', toolUses: [] }, { role: 'assistant', text: 'Done:\n- **Script** is in `DES`', toolUses: [] })
+    await ($.tool.call as unknown as Call)({ tool: 'Read', tool_use_id: 'r1', file_path: '/home/dev/project/a.ts' })
+    await clock.settle()
+    const ui = await $.ui.mount({ plugin: 'whatishappening', surface, component: 'Pane', requestId: 'whatishappening', props: { ...(PANE as object), scroll: { offset: 0, bodyRows: 40 } } as never })
+    expect(await ui.find({ type: 'Text', text: /^First look\. …$/ }), 'the earlier reply, by its first line').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Script$/ }), 'the latest, its bold drawn bold').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^DES$/ }), 'and its code').toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ text: /Show the whole log/ }), 'following its end').toBeDefined()
+      await ui.press({ key: 'tl-all' })
+      expect(await ui.find({ text: /Follow the latest/ }), 'the whole log, and the way back').toBeDefined()
+    }
   })
 
   test(`a background command shows until its report comes or it is stopped (${surface})`, { timeoutMs: 30000 }, async ($, on) => {

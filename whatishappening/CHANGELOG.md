@@ -4,6 +4,15 @@ All notable changes to this mod. Versions follow [Semantic Versioning](https://s
 
 ## Unreleased
 
+## 0.10.0 - 2026-11-06
+
+- Sessions: a chat you named with `/rename` shows that name, not the title Claude Code wrote for it.
+
+- Timeline: in the terminal the pane fits its height, and the Timeline takes the rows the other sections leave, its latest line at the bottom; what does not fit leaves by the top, so Usage, To-do and the rest stay in sight with no scrolling. `↑ Show the whole log` shows all of it, `↓ Follow the latest` goes back.
+- Timeline: only Claude's latest reply shows in full; the earlier ones show their first line.
+
+- Timeline: Claude's reply shows within about 3 seconds, not only once the call that follows it ends, so a long command no longer holds it back.
+
 ## 0.9.0 - 2026-11-06
 
 - Timeline: Claude's replies keep their formatting, as in the chat: paragraphs, bullet and numbered lists with their indent, **bold**, `code` in color, links and headings. A reply shows whole up to 1500 characters, then cut at a line; code blocks are left out.

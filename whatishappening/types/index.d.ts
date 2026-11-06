@@ -159,6 +159,8 @@ declare module 'claude-code' {
       open: string
       /** Sections the person closed. */
       folded: string[]
+      /** The whole Timeline shown, not only its latest lines that fit. */
+      wholeLog: boolean
       /** The timeline: the latest prompts and what happened during each. */
       story: StoryTurn[]
       /** The main chat's commands running in the background. */

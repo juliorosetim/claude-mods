@@ -102,6 +102,7 @@ What happened, prompt by prompt, at the bottom of the pane, as a clean log rathe
 ```
 
 - **The latest prompt:** what Claude wrote to you between its calls, formatted as in the chat (lists, bold, code, headings), the prompts you typed while it answered (❯), the reports of background commands, the steps done, the agents it started and finished, and the failures, each with its time to the second.
+- **Follows the end:** in the terminal the Timeline takes the rows the other sections leave and shows its latest lines, so the sections above stay in sight. `↑ Show the whole log` shows all of it. Only Claude's latest reply shows in full; the earlier ones show their first line.
 - **The calls in between:** one dim line of counts, `Called GitLab 2 times · ran 1 command`. A subagent's own calls stay on its card in Agents.
 - **Earlier prompts:** one line each, with how long Claude took, the calls it made, the edits and the errors.
 - **Marks:** ● what Claude said (green: a background report), ◆ agent started, ◇ agent finished, ✓ step done, ✗ failed, ⊘ blocked.
